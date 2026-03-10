@@ -34,6 +34,27 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+  nats-integration:
+    name: NATS sink integration
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:latest
+        ports:
+          - 4222:4222
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
+
+      - name: NATS sink tests
+        run: cargo test --features nats --test nats_sink_tests
+        env:
+          NATS_URL: nats://localhost:4222
+
   feature-matrix:
     name: Feature builds
     runs-on: ubuntu-latest

@@ -10,6 +10,10 @@ homepage = "https://github.com/defenseunicorns/peat-gateway"
 keywords = ["mesh", "gateway", "crdt", "cdc", "multi-tenant"]
 categories = ["network-programming"]
 
+[lib]
+name = "peat_gateway"
+path = "src/lib.rs"
+
 [[bin]]
 name = "peat-gateway"
 path = "src/main.rs"
@@ -69,3 +73,6 @@ full = ["nats", "kafka", "webhook", "oidc", "postgres"]
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
 tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+async-nats = "0.38"
+futures = "0.3"
