@@ -6,10 +6,16 @@ use std::env;
 pub struct GatewayConfig {
     /// Address to bind the API server
     pub bind_addr: String,
-    /// Path to persistent state directory
-    pub data_dir: String,
+    /// Storage backend configuration
+    pub storage: StorageConfig,
     /// CDC configuration
     pub cdc: CdcConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum StorageConfig {
+    Redb { path: String },
+    Postgres { url: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,9 +28,26 @@ pub struct CdcConfig {
 
 impl GatewayConfig {
     pub fn from_env() -> Result<Self> {
+        let storage = match env::var("PEAT_STORAGE_BACKEND")
+            .unwrap_or_else(|_| "redb".into())
+            .as_str()
+        {
+            "postgres" => {
+                let url = env::var("PEAT_STORAGE_POSTGRES_URL")
+                    .unwrap_or_else(|_| "postgres://peat:peat@localhost:5432/peat_gateway".into());
+                StorageConfig::Postgres { url }
+            }
+            _ => {
+                let data_dir =
+                    env::var("PEAT_GATEWAY_DATA_DIR").unwrap_or_else(|_| "./data".into());
+                let path = format!("{}/gateway.redb", data_dir);
+                StorageConfig::Redb { path }
+            }
+        };
+
         Ok(Self {
             bind_addr: env::var("PEAT_GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
-            data_dir: env::var("PEAT_GATEWAY_DATA_DIR").unwrap_or_else(|_| "./data".into()),
+            storage,
             cdc: CdcConfig {
                 nats_url: env::var("PEAT_CDC_NATS_URL").ok(),
                 kafka_brokers: env::var("PEAT_CDC_KAFKA_BROKERS").ok(),

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct Organization {
     pub org_id: String,
     pub display_name: String,
-    pub formations: Vec<FormationConfig>,
     pub quotas: OrgQuotas,
     pub created_at: u64,
 }

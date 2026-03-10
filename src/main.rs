@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod cdc;
 mod config;
+mod storage;
 mod tenant;
 
 #[tokio::main]
@@ -18,10 +19,11 @@ async fn main() -> Result<()> {
     let config = config::GatewayConfig::from_env()?;
     info!(
         bind = %config.bind_addr,
+        storage = ?config.storage,
         "Starting peat-gateway"
     );
 
-    // Initialize tenant manager
+    // Initialize tenant manager (opens storage backend)
     let tenant_mgr = tenant::TenantManager::new(&config).await?;
 
     // Initialize CDC engine
