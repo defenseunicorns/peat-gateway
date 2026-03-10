@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::tenant::models::{EnrollmentPolicy, FormationConfig};
+use crate::tenant::models::{EnrollmentPolicy, FormationConfig, OrgQuotas};
 use crate::tenant::{Organization, TenantManager};
 
 type ApiError = (axum::http::StatusCode, String);
@@ -45,6 +45,23 @@ async fn get_org(
     Path(org_id): Path<String>,
 ) -> Result<Json<Organization>, ApiError> {
     mgr.get_org(&org_id).await.map(Json).map_err(not_found)
+}
+
+#[derive(Deserialize)]
+struct UpdateOrgRequest {
+    display_name: Option<String>,
+    quotas: Option<OrgQuotas>,
+}
+
+async fn update_org(
+    State(mgr): State<TenantManager>,
+    Path(org_id): Path<String>,
+    Json(req): Json<UpdateOrgRequest>,
+) -> Result<Json<Organization>, ApiError> {
+    mgr.update_org(&org_id, req.display_name, req.quotas)
+        .await
+        .map(Json)
+        .map_err(not_found)
 }
 
 async fn delete_org(
@@ -110,13 +127,16 @@ async fn delete_formation(
 pub fn router(tenant_mgr: TenantManager) -> Router {
     Router::new()
         .route("/", post(create_org).get(list_orgs))
-        .route("/{org_id}", get(get_org).delete(delete_org))
         .route(
-            "/{org_id}/formations",
+            "/:org_id",
+            get(get_org).patch(update_org).delete(delete_org),
+        )
+        .route(
+            "/:org_id/formations",
             post(create_formation).get(list_formations),
         )
         .route(
-            "/{org_id}/formations/{app_id}",
+            "/:org_id/formations/:app_id",
             get(get_formation).delete(delete_formation),
         )
         .with_state(tenant_mgr)

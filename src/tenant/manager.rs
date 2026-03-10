@@ -58,6 +58,26 @@ impl TenantManager {
         self.store.list_orgs().await
     }
 
+    pub async fn update_org(
+        &self,
+        org_id: &str,
+        display_name: Option<String>,
+        quotas: Option<super::models::OrgQuotas>,
+    ) -> Result<Organization> {
+        let mut org = self.get_org(org_id).await?;
+
+        if let Some(name) = display_name {
+            org.display_name = name;
+        }
+        if let Some(q) = quotas {
+            org.quotas = q;
+        }
+
+        self.store.update_org(&org).await?;
+        info!(org_id = %org_id, "Updated organization");
+        Ok(org)
+    }
+
     pub async fn delete_org(&self, org_id: &str) -> Result<()> {
         if !self.store.delete_org(org_id).await? {
             bail!("Organization '{}' not found", org_id);

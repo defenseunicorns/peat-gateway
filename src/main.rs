@@ -1,14 +1,8 @@
-#![allow(dead_code)] // Scaffolding — stubs will be wired incrementally
-
 use anyhow::Result;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-mod api;
-mod cdc;
-mod config;
-mod storage;
-mod tenant;
+use peat_gateway::{api, cdc, config, tenant};
 
 #[tokio::main]
 async fn main() -> Result<()> {

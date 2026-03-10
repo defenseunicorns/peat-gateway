@@ -1,0 +1,7 @@
+#![allow(dead_code)] // Scaffolding — stubs will be wired incrementally
+
+pub mod api;
+pub mod cdc;
+pub mod config;
+pub mod storage;
+pub mod tenant;
