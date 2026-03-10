@@ -6,10 +6,12 @@ use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
 
 use super::StorageBackend;
-use crate::tenant::models::{FormationConfig, Organization};
+use crate::tenant::models::{CdcSinkConfig, EnrollmentToken, FormationConfig, Organization};
 
 const ORGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("orgs");
 const FORMATIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("formations");
+const TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrollment_tokens");
+const SINKS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("cdc_sinks");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -27,6 +29,8 @@ impl RedbBackend {
         {
             let _ = txn.open_table(ORGS_TABLE)?;
             let _ = txn.open_table(FORMATIONS_TABLE)?;
+            let _ = txn.open_table(TOKENS_TABLE)?;
+            let _ = txn.open_table(SINKS_TABLE)?;
         }
         txn.commit()?;
 
@@ -41,6 +45,26 @@ fn formation_key(org_id: &str, app_id: &str) -> String {
 
 /// Prefix for all formations in an org: "org_id\0"
 fn formation_prefix(org_id: &str) -> String {
+    format!("{}\0", org_id)
+}
+
+/// Composite key for tokens: "org_id\0token_id"
+fn token_key(org_id: &str, token_id: &str) -> String {
+    format!("{}\0{}", org_id, token_id)
+}
+
+/// Prefix for tokens scoped to org+app: "org_id\0" (filter by app_id in code)
+fn token_prefix(org_id: &str) -> String {
+    format!("{}\0", org_id)
+}
+
+/// Composite key for sinks: "org_id\0sink_id"
+fn sink_key(org_id: &str, sink_id: &str) -> String {
+    format!("{}\0{}", org_id, sink_id)
+}
+
+/// Prefix for all sinks in an org: "org_id\0"
+fn sink_prefix(org_id: &str) -> String {
     format!("{}\0", org_id)
 }
 
@@ -112,22 +136,21 @@ impl StorageBackend for RedbBackend {
                 let val = table.remove(org_id.as_str())?;
                 val.is_some()
             };
-            // Also remove all formations for this org
-            {
-                let mut table = txn.open_table(FORMATIONS_TABLE)?;
+            // Also remove all formations, tokens, and sinks for this org
+            for table_def in [FORMATIONS_TABLE, TOKENS_TABLE, SINKS_TABLE] {
+                let mut table = txn.open_table(table_def)?;
                 let keys_to_remove: Vec<String> = {
-                    let read_txn = table.iter()?;
-                    read_txn
-                        .filter_map(|entry| {
-                            let (key, _) = entry.ok()?;
-                            let k = key.value().to_string();
-                            if k.starts_with(&prefix) {
-                                Some(k)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
+                    let iter = table.iter()?;
+                    iter.filter_map(|entry| {
+                        let (key, _) = entry.ok()?;
+                        let k = key.value().to_string();
+                        if k.starts_with(&prefix) {
+                            Some(k)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
                 };
                 for key in keys_to_remove {
                     table.remove(key.as_str())?;
@@ -199,6 +222,152 @@ impl StorageBackend for RedbBackend {
             let txn = db.begin_write()?;
             let removed = {
                 let mut table = txn.open_table(FORMATIONS_TABLE)?;
+                let val = table.remove(key.as_str())?;
+                val.is_some()
+            };
+            txn.commit()?;
+            Ok(removed)
+        })
+        .await?
+    }
+
+    // --- Enrollment tokens ---
+
+    async fn create_token(&self, token: &EnrollmentToken) -> Result<()> {
+        let bytes = serde_json::to_vec(token)?;
+        let key = token_key(&token.org_id, &token.token_id);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(TOKENS_TABLE)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn get_token(&self, org_id: &str, token_id: &str) -> Result<Option<EnrollmentToken>> {
+        let db = self.db.clone();
+        let key = token_key(org_id, token_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(TOKENS_TABLE)?;
+            match table.get(key.as_str())? {
+                Some(value) => Ok(Some(serde_json::from_slice(value.value())?)),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn list_tokens(&self, org_id: &str, app_id: &str) -> Result<Vec<EnrollmentToken>> {
+        let db = self.db.clone();
+        let prefix = token_prefix(org_id);
+        let app_id = app_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(TOKENS_TABLE)?;
+            let mut tokens = Vec::new();
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                if key.value().starts_with(&prefix) {
+                    let t: EnrollmentToken = serde_json::from_slice(value.value())?;
+                    if t.app_id == app_id {
+                        tokens.push(t);
+                    }
+                }
+            }
+            Ok(tokens)
+        })
+        .await?
+    }
+
+    async fn update_token(&self, token: &EnrollmentToken) -> Result<()> {
+        self.create_token(token).await
+    }
+
+    async fn delete_token(&self, org_id: &str, token_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = token_key(org_id, token_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            let removed = {
+                let mut table = txn.open_table(TOKENS_TABLE)?;
+                let val = table.remove(key.as_str())?;
+                val.is_some()
+            };
+            txn.commit()?;
+            Ok(removed)
+        })
+        .await?
+    }
+
+    // --- CDC sinks ---
+
+    async fn create_sink(&self, sink: &CdcSinkConfig) -> Result<()> {
+        let bytes = serde_json::to_vec(sink)?;
+        let key = sink_key(&sink.org_id, &sink.sink_id);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(SINKS_TABLE)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn get_sink(&self, org_id: &str, sink_id: &str) -> Result<Option<CdcSinkConfig>> {
+        let db = self.db.clone();
+        let key = sink_key(org_id, sink_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(SINKS_TABLE)?;
+            match table.get(key.as_str())? {
+                Some(value) => Ok(Some(serde_json::from_slice(value.value())?)),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn list_sinks(&self, org_id: &str) -> Result<Vec<CdcSinkConfig>> {
+        let db = self.db.clone();
+        let prefix = sink_prefix(org_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(SINKS_TABLE)?;
+            let mut sinks = Vec::new();
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                if key.value().starts_with(&prefix) {
+                    sinks.push(serde_json::from_slice(value.value())?);
+                }
+            }
+            Ok(sinks)
+        })
+        .await?
+    }
+
+    async fn update_sink(&self, sink: &CdcSinkConfig) -> Result<()> {
+        self.create_sink(sink).await
+    }
+
+    async fn delete_sink(&self, org_id: &str, sink_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = sink_key(org_id, sink_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            let removed = {
+                let mut table = txn.open_table(SINKS_TABLE)?;
                 let val = table.remove(key.as_str())?;
                 val.is_some()
             };

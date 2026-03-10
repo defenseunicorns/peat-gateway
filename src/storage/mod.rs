@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::config::StorageConfig;
-use crate::tenant::models::{FormationConfig, Organization};
+use crate::tenant::models::{CdcSinkConfig, EnrollmentToken, FormationConfig, Organization};
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
@@ -21,6 +21,20 @@ pub trait StorageBackend: Send + Sync {
     async fn get_formation(&self, org_id: &str, app_id: &str) -> Result<Option<FormationConfig>>;
     async fn list_formations(&self, org_id: &str) -> Result<Vec<FormationConfig>>;
     async fn delete_formation(&self, org_id: &str, app_id: &str) -> Result<bool>;
+
+    // Enrollment tokens
+    async fn create_token(&self, token: &EnrollmentToken) -> Result<()>;
+    async fn get_token(&self, org_id: &str, token_id: &str) -> Result<Option<EnrollmentToken>>;
+    async fn list_tokens(&self, org_id: &str, app_id: &str) -> Result<Vec<EnrollmentToken>>;
+    async fn update_token(&self, token: &EnrollmentToken) -> Result<()>;
+    async fn delete_token(&self, org_id: &str, token_id: &str) -> Result<bool>;
+
+    // CDC sink configs
+    async fn create_sink(&self, sink: &CdcSinkConfig) -> Result<()>;
+    async fn get_sink(&self, org_id: &str, sink_id: &str) -> Result<Option<CdcSinkConfig>>;
+    async fn list_sinks(&self, org_id: &str) -> Result<Vec<CdcSinkConfig>>;
+    async fn update_sink(&self, sink: &CdcSinkConfig) -> Result<()>;
+    async fn delete_sink(&self, org_id: &str, sink_id: &str) -> Result<bool>;
 }
 
 pub async fn open(config: &StorageConfig) -> Result<Box<dyn StorageBackend>> {

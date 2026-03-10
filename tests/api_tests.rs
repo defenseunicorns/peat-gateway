@@ -672,3 +672,463 @@ async fn create_formation_missing_app_id_returns_422() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+// ── Enrollment Token CRUD ───────────────────────────────────────
+
+/// Helper: create org + formation, return base URL
+async fn setup_org_and_formation(client: &Client, base: &str) {
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/orgs/acme/formations"))
+        .json(&json!({"app_id": "logistics"}))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_and_get_enrollment_token() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    // Create token
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({
+            "app_id": "logistics",
+            "label": "field-team-alpha",
+            "max_uses": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["org_id"], "acme");
+    assert_eq!(body["app_id"], "logistics");
+    assert_eq!(body["label"], "field-team-alpha");
+    assert_eq!(body["max_uses"], 10);
+    assert_eq!(body["uses"], 0);
+    assert_eq!(body["revoked"], false);
+    let token_id = body["token_id"].as_str().unwrap().to_string();
+    assert_eq!(token_id.len(), 32); // 16 bytes hex
+
+    // Get token
+    let resp = client
+        .get(format!("{base}/orgs/acme/tokens/{token_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let get_body: Value = resp.json().await.unwrap();
+    assert_eq!(get_body["token_id"], token_id);
+}
+
+#[tokio::test]
+async fn list_tokens_scoped_to_formation() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    // Create a second formation
+    client
+        .post(format!("{base}/orgs/acme/formations"))
+        .json(&json!({"app_id": "comms"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Token for logistics
+    client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({"app_id": "logistics", "label": "tok-a"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Token for comms
+    client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({"app_id": "comms", "label": "tok-b"}))
+        .send()
+        .await
+        .unwrap();
+
+    // List logistics tokens — should only see 1
+    let resp = client
+        .get(format!("{base}/orgs/acme/formations/logistics/tokens"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["label"], "tok-a");
+}
+
+#[tokio::test]
+async fn revoke_enrollment_token() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({"app_id": "logistics", "label": "temp"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let token_id = body["token_id"].as_str().unwrap();
+
+    // Revoke
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens/{token_id}/revoke"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["revoked"], true);
+
+    // Revoke again — should fail
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens/{token_id}/revoke"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn delete_enrollment_token() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({"app_id": "logistics", "label": "disposable"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let token_id = body["token_id"].as_str().unwrap();
+
+    let resp = client
+        .delete(format!("{base}/orgs/acme/tokens/{token_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Gone
+    let resp = client
+        .get(format!("{base}/orgs/acme/tokens/{token_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_token_for_nonexistent_formation_returns_400() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/tokens"))
+        .json(&json!({"app_id": "ghost", "label": "nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── CDC Sink CRUD ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_and_get_cdc_sink() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({
+            "sink_type": {"Nats": {"subject_prefix": "peat.acme"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["org_id"], "acme");
+    assert_eq!(body["enabled"], true);
+    assert!(body["sink_id"].is_string());
+    let sink_id = body["sink_id"].as_str().unwrap();
+
+    // Get
+    let resp = client
+        .get(format!("{base}/orgs/acme/sinks/{sink_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let get_body: Value = resp.json().await.unwrap();
+    assert_eq!(get_body["sink_type"]["Nats"]["subject_prefix"], "peat.acme");
+}
+
+#[tokio::test]
+async fn list_cdc_sinks() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Empty
+    let resp = client
+        .get(format!("{base}/orgs/acme/sinks"))
+        .send()
+        .await
+        .unwrap();
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+
+    // Create two
+    client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({"sink_type": {"Nats": {"subject_prefix": "peat.acme"}}}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({"sink_type": {"Webhook": {"url": "https://example.com/hook"}}}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{base}/orgs/acme/sinks"))
+        .send()
+        .await
+        .unwrap();
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(body.len(), 2);
+}
+
+#[tokio::test]
+async fn toggle_cdc_sink() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({"sink_type": {"Nats": {"subject_prefix": "peat.acme"}}}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let sink_id = body["sink_id"].as_str().unwrap();
+    assert_eq!(body["enabled"], true);
+
+    // Disable
+    let resp = client
+        .patch(format!("{base}/orgs/acme/sinks/{sink_id}"))
+        .json(&json!({"enabled": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], false);
+
+    // Re-enable
+    let resp = client
+        .patch(format!("{base}/orgs/acme/sinks/{sink_id}"))
+        .json(&json!({"enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], true);
+}
+
+#[tokio::test]
+async fn delete_cdc_sink() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({"sink_type": {"Kafka": {"topic": "peat-events"}}}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let sink_id = body["sink_id"].as_str().unwrap();
+
+    let resp = client
+        .delete(format!("{base}/orgs/acme/sinks/{sink_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Gone
+    let resp = client
+        .get(format!("{base}/orgs/acme/sinks/{sink_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cdc_sink_quota_enforcement() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Set quota to 2
+    client
+        .patch(format!("{base}/orgs/acme"))
+        .json(&json!({
+            "quotas": {
+                "max_formations": 10,
+                "max_peers_per_formation": 100,
+                "max_documents_per_formation": 10000,
+                "max_cdc_sinks": 2
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Create 2 — should work
+    for i in 0..2 {
+        let resp = client
+            .post(format!("{base}/orgs/acme/sinks"))
+            .json(&json!({"sink_type": {"Nats": {"subject_prefix": format!("peat.{i}")}}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // Third should fail
+    let resp = client
+        .post(format!("{base}/orgs/acme/sinks"))
+        .json(&json!({"sink_type": {"Nats": {"subject_prefix": "peat.overflow"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("quota"));
+}
+
+// ── Stub endpoints (peers, documents, certificates) ─────────────
+
+#[tokio::test]
+async fn list_peers_returns_empty() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    let resp = client
+        .get(format!("{base}/orgs/acme/formations/logistics/peers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn list_peers_nonexistent_formation_returns_404() {
+    let (client, base, _dir) = spawn_app().await;
+
+    client
+        .post(format!("{base}/orgs"))
+        .json(&json!({"org_id": "acme", "display_name": "Acme"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{base}/orgs/acme/formations/ghost/peers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_documents_returns_empty() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    let resp = client
+        .get(format!("{base}/orgs/acme/formations/logistics/documents"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn list_certificates_returns_empty() {
+    let (client, base, _dir) = spawn_app().await;
+    setup_org_and_formation(&client, &base).await;
+
+    let resp = client
+        .get(format!(
+            "{base}/orgs/acme/formations/logistics/certificates"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Vec<Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
