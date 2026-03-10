@@ -274,12 +274,7 @@ async fn webhook_disabled_sink_does_not_deliver() {
         .await
         .unwrap();
     let sink = tenant_mgr
-        .create_sink(
-            "acme",
-            CdcSinkType::Webhook {
-                url: url.clone(),
-            },
-        )
+        .create_sink("acme", CdcSinkType::Webhook { url: url.clone() })
         .await
         .unwrap();
 
@@ -373,7 +368,11 @@ async fn webhook_org_isolation_no_cross_delivery() {
     let reqs_bravo = state_bravo.requests.lock().await;
 
     assert_eq!(reqs_alpha.len(), 1, "Alpha should receive event");
-    assert_eq!(reqs_bravo.len(), 0, "Bravo should NOT receive alpha's event");
+    assert_eq!(
+        reqs_bravo.len(),
+        0,
+        "Bravo should NOT receive alpha's event"
+    );
 
     let received: CdcEvent = serde_json::from_slice(&reqs_alpha[0].body).unwrap();
     assert_eq!(received.org_id, "alpha");

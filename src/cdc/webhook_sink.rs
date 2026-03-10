@@ -56,11 +56,7 @@ mod inner {
                         return Ok(());
                     }
                     Ok(resp) if resp.status().is_client_error() => {
-                        bail!(
-                            "Webhook {} returned {} — not retrying",
-                            url,
-                            resp.status()
-                        );
+                        bail!("Webhook {} returned {} — not retrying", url, resp.status());
                     }
                     Ok(resp) => {
                         warn!(
@@ -88,11 +84,7 @@ mod inner {
                 }
             }
 
-            bail!(
-                "Webhook {} failed after {} retries",
-                url,
-                MAX_RETRIES
-            );
+            bail!("Webhook {} failed after {} retries", url, MAX_RETRIES);
         }
     }
 }
