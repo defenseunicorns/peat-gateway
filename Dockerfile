@@ -1,4 +1,5 @@
 FROM rust:1.94 AS builder
+RUN apt-get update && apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
 RUN cargo build --release --bin peat-gateway --features full
