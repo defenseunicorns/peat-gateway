@@ -74,3 +74,5 @@ full = ["nats", "kafka", "webhook", "oidc", "postgres"]
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
+async-nats = "0.38"
+futures = "0.3"

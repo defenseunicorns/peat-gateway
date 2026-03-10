@@ -77,6 +77,17 @@ pub enum CdcSinkType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcEvent {
+    pub org_id: String,
+    pub app_id: String,
+    pub document_id: String,
+    pub change_hash: String,
+    pub actor_id: String,
+    pub timestamp_ms: u64,
+    pub patches: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub peer_id: String,
     pub app_id: String,
