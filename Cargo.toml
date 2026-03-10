@@ -1,0 +1,68 @@
+[package]
+name = "peat-gateway"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kit Plummer <kitplummer@defenseunicorns.com>"]
+license = "Apache-2.0"
+description = "Enterprise control plane for Peat mesh — multi-org tenancy, CDC, IDAM federation"
+repository = "https://github.com/defenseunicorns/peat-gateway"
+homepage = "https://github.com/defenseunicorns/peat-gateway"
+keywords = ["mesh", "gateway", "crdt", "cdc", "multi-tenant"]
+categories = ["network-programming"]
+
+[[bin]]
+name = "peat-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Mesh networking
+peat-mesh = { version = "0.5", features = ["automerge-backend", "broker"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework (admin API)
+axum = { version = "0.7", features = ["macros"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# CDC sinks (optional)
+async-nats = { version = "0.38", optional = true }
+rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# Identity (optional)
+openidconnect = { version = "4", optional = true }
+
+# Storage
+redb = "2.4"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "migrate"], optional = true }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+[features]
+default = ["nats", "webhook", "oidc"]
+nats = ["dep:async-nats"]
+kafka = ["dep:rdkafka"]
+webhook = ["dep:reqwest"]
+oidc = ["dep:openidconnect"]
+postgres = ["dep:sqlx"]
+full = ["nats", "kafka", "webhook", "oidc", "postgres"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util", "macros"] }
+tempfile = "3"
