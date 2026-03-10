@@ -1,0 +1,6 @@
+apiVersion: v2
+name: peat-gateway
+description: Enterprise control plane for Peat mesh — multi-org tenancy, CDC, IDAM federation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
