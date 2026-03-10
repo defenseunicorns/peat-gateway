@@ -10,6 +10,8 @@ pub struct CdcEngine {
     tenant_mgr: TenantManager,
     #[cfg(feature = "nats")]
     nats_sink: Option<super::nats_sink::NatsSink>,
+    #[cfg(feature = "webhook")]
+    webhook_sink: super::webhook_sink::WebhookSink,
 }
 
 impl CdcEngine {
@@ -26,11 +28,16 @@ impl CdcEngine {
             }
         };
 
+        #[cfg(feature = "webhook")]
+        let webhook_sink = super::webhook_sink::WebhookSink::new()?;
+
         info!("CDC engine initialized");
         Ok(Self {
             tenant_mgr,
             #[cfg(feature = "nats")]
             nats_sink,
+            #[cfg(feature = "webhook")]
+            webhook_sink,
         })
     }
 
@@ -71,8 +78,22 @@ impl CdcEngine {
                 CdcSinkType::Kafka { .. } => {
                     // TODO: Kafka delivery
                 }
+                #[cfg(feature = "webhook")]
+                CdcSinkType::Webhook { url } => {
+                    if let Err(e) = self.webhook_sink.publish(url, event).await {
+                        warn!(
+                            sink_id = sink.sink_id,
+                            error = %e,
+                            "Failed to publish to webhook sink"
+                        );
+                    }
+                }
+                #[cfg(not(feature = "webhook"))]
                 CdcSinkType::Webhook { .. } => {
-                    // TODO: Webhook delivery
+                    warn!(
+                        sink_id = sink.sink_id,
+                        "Webhook sink configured but webhook feature is not enabled"
+                    );
                 }
             }
         }
