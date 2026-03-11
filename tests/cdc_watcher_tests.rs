@@ -136,7 +136,7 @@ async fn watcher_publishes_cdc_on_document_upsert() {
 
     // Set up watcher with InMemoryBackend
     let (_backend, doc_store) = create_in_memory_backend("logistics").await;
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("acme".into(), "logistics".into(), doc_store.clone())
         .await
@@ -189,7 +189,7 @@ async fn watcher_publishes_cdc_on_document_removal() {
         .unwrap();
 
     let (_backend, doc_store) = create_in_memory_backend("logistics").await;
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("acme".into(), "logistics".into(), doc_store.clone())
         .await
@@ -239,7 +239,7 @@ async fn watcher_multiple_documents_multiple_events() {
         .unwrap();
 
     let (_backend, doc_store) = create_in_memory_backend("comms").await;
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("acme".into(), "comms".into(), doc_store.clone())
         .await
@@ -295,7 +295,7 @@ async fn watcher_unwatch_stops_events() {
         .unwrap();
 
     let (_backend, doc_store) = create_in_memory_backend("logistics").await;
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("acme".into(), "logistics".into(), doc_store.clone())
         .await
@@ -356,7 +356,7 @@ async fn watcher_initial_snapshot_not_emitted() {
         doc_store.upsert("acme.logistics", doc).await.unwrap();
     }
 
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("acme".into(), "logistics".into(), doc_store.clone())
         .await
@@ -416,7 +416,7 @@ async fn watcher_org_isolation() {
     let (_be_alpha, store_alpha) = create_in_memory_backend("mesh").await;
     let (_be_bravo, store_bravo) = create_in_memory_backend("mesh").await;
 
-    let watcher = CdcWatcher::new(engine);
+    let watcher = CdcWatcher::new(engine, tenant_mgr.clone());
     watcher
         .watch_formation("alpha".into(), "mesh".into(), store_alpha.clone())
         .await
@@ -441,6 +441,84 @@ async fn watcher_org_isolation() {
         reqs_bravo.len(),
         0,
         "Bravo should NOT receive alpha's event"
+    );
+
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn watcher_cursor_deduplication() {
+    let (tenant_mgr, engine, _dir) = setup().await;
+    let mock = MockState::new();
+    let (url, mock) = start_mock_webhook(mock).await;
+
+    tenant_mgr
+        .create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    tenant_mgr
+        .create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+    tenant_mgr
+        .create_sink("acme", CdcSinkType::Webhook { url })
+        .await
+        .unwrap();
+
+    let (_backend, doc_store) = create_in_memory_backend("logistics").await;
+
+    // First watcher session: upsert a document, cursor gets persisted
+    let watcher = CdcWatcher::new(engine.clone(), tenant_mgr.clone());
+    watcher
+        .watch_formation("acme".into(), "logistics".into(), doc_store.clone())
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), Value::String("ready".to_string()));
+    let doc = Document::with_id("order-dedup", fields);
+    doc_store.upsert("acme.logistics", doc).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        mock.call_count.load(Ordering::SeqCst),
+        1,
+        "First upsert should deliver"
+    );
+
+    // Verify cursor was persisted
+    let cursor = tenant_mgr
+        .get_cursor("acme", "logistics", "order-dedup")
+        .await
+        .unwrap();
+    assert!(cursor.is_some(), "Cursor should be persisted after publish");
+
+    // A different change to the same doc should still deliver (different hash)
+    let mut fields2 = HashMap::new();
+    fields2.insert("status".to_string(), Value::String("shipped".to_string()));
+    let doc2 = Document::with_id("order-dedup", fields2);
+    doc_store.upsert("acme.logistics", doc2).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        mock.call_count.load(Ordering::SeqCst),
+        2,
+        "Updated content should produce different hash and deliver"
+    );
+
+    // Verify cursor was updated to new hash
+    let cursor2 = tenant_mgr
+        .get_cursor("acme", "logistics", "order-dedup")
+        .await
+        .unwrap();
+    assert!(cursor2.is_some());
+    assert_ne!(
+        cursor, cursor2,
+        "Cursor should update after new change is published"
     );
 
     watcher.shutdown().await;

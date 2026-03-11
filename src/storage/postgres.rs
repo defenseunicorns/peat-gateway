@@ -65,6 +65,19 @@ mod inner {
             .execute(&pool)
             .await?;
 
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS cdc_cursors (
+                    org_id TEXT NOT NULL,
+                    app_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
+                    change_hash TEXT NOT NULL,
+                    PRIMARY KEY (org_id, app_id, document_id),
+                    FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await?;
+
             Ok(Self { pool })
         }
     }
@@ -310,6 +323,47 @@ mod inner {
                 .execute(&self.pool)
                 .await?;
             Ok(result.rows_affected() > 0)
+        }
+
+        // --- CDC cursors ---
+
+        async fn get_cursor(
+            &self,
+            org_id: &str,
+            app_id: &str,
+            document_id: &str,
+        ) -> Result<Option<String>> {
+            let row = sqlx::query(
+                "SELECT change_hash FROM cdc_cursors WHERE org_id = $1 AND app_id = $2 AND document_id = $3",
+            )
+            .bind(org_id)
+            .bind(app_id)
+            .bind(document_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            Ok(row.map(|r| r.get("change_hash")))
+        }
+
+        async fn set_cursor(
+            &self,
+            org_id: &str,
+            app_id: &str,
+            document_id: &str,
+            change_hash: &str,
+        ) -> Result<()> {
+            sqlx::query(
+                "INSERT INTO cdc_cursors (org_id, app_id, document_id, change_hash)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (org_id, app_id, document_id)
+                 DO UPDATE SET change_hash = EXCLUDED.change_hash",
+            )
+            .bind(org_id)
+            .bind(app_id)
+            .bind(document_id)
+            .bind(change_hash)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
         }
     }
 }

@@ -301,4 +301,27 @@ impl TenantManager {
         info!(org_id = %org_id, sink_id = %sink_id, "Deleted CDC sink");
         Ok(())
     }
+
+    // --- CDC Cursors ---
+
+    pub async fn get_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+    ) -> Result<Option<String>> {
+        self.store.get_cursor(org_id, app_id, document_id).await
+    }
+
+    pub async fn set_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+        change_hash: &str,
+    ) -> Result<()> {
+        self.store
+            .set_cursor(org_id, app_id, document_id, change_hash)
+            .await
+    }
 }

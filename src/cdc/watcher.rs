@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::tenant::models::CdcEvent;
+use crate::tenant::TenantManager;
 
 use super::CdcEngine;
 
@@ -20,15 +21,20 @@ type FormationKey = (String, String);
 ///
 /// Each formation gets its own background task that calls `DocumentStore::observe()`
 /// and converts `ChangeEvent` into `CdcEvent` for the CDC engine.
+///
+/// Persists a cursor (last emitted change_hash) per document so that duplicate
+/// events are suppressed on restart.
 pub struct CdcWatcher {
     engine: CdcEngine,
+    tenant_mgr: TenantManager,
     handles: Arc<Mutex<HashMap<FormationKey, JoinHandle<()>>>>,
 }
 
 impl CdcWatcher {
-    pub fn new(engine: CdcEngine) -> Self {
+    pub fn new(engine: CdcEngine, tenant_mgr: TenantManager) -> Self {
         Self {
             engine,
+            tenant_mgr,
             handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -36,7 +42,8 @@ impl CdcWatcher {
     /// Start watching a formation's document store for changes.
     ///
     /// Spawns a background task that listens to the `ChangeStream` and
-    /// publishes `CdcEvent`s via the CDC engine.
+    /// publishes `CdcEvent`s via the CDC engine. After each successful
+    /// publish, the change_hash is persisted as a cursor for deduplication.
     pub async fn watch_formation(
         &self,
         org_id: String,
@@ -59,6 +66,7 @@ impl CdcWatcher {
             .with_context(|| format!("Failed to observe collection {collection}"))?;
 
         let engine = self.engine.clone();
+        let tenant_mgr = self.tenant_mgr.clone();
         let task_org = org_id.clone();
         let task_app = app_id.clone();
 
@@ -79,9 +87,22 @@ impl CdcWatcher {
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
 
-                        // Use document fields hash as the change hash for idempotency
                         let change_hash =
                             format!("{:x}", hash_fields(&doc_id, &document.fields, timestamp_ms));
+
+                        // Deduplicate: skip if cursor matches this change_hash
+                        if let Ok(Some(ref cursor)) =
+                            tenant_mgr.get_cursor(&task_org, &task_app, &doc_id).await
+                        {
+                            if cursor == &change_hash {
+                                debug!(
+                                    doc_id = %doc_id,
+                                    change_hash = %change_hash,
+                                    "Skipping duplicate CDC event (cursor match)"
+                                );
+                                continue;
+                            }
+                        }
 
                         let cdc_event = CdcEvent {
                             org_id: task_org.clone(),
@@ -106,6 +127,23 @@ impl CdcWatcher {
                                 doc_id = %cdc_event.document_id,
                                 error = %e,
                                 "Failed to publish CDC event from watcher"
+                            );
+                            continue;
+                        }
+
+                        // Persist cursor after successful publish
+                        if let Err(e) = tenant_mgr
+                            .set_cursor(
+                                &cdc_event.org_id,
+                                &cdc_event.app_id,
+                                &cdc_event.document_id,
+                                &cdc_event.change_hash,
+                            )
+                            .await
+                        {
+                            warn!(
+                                error = %e,
+                                "Failed to persist CDC cursor (event was published)"
                             );
                         }
                     }
@@ -138,6 +176,23 @@ impl CdcWatcher {
                                 error = %e,
                                 "Failed to publish CDC removal event"
                             );
+                            continue;
+                        }
+
+                        // Persist cursor for removal too
+                        if let Err(e) = tenant_mgr
+                            .set_cursor(
+                                &cdc_event.org_id,
+                                &cdc_event.app_id,
+                                &cdc_event.document_id,
+                                &cdc_event.change_hash,
+                            )
+                            .await
+                        {
+                            warn!(
+                                error = %e,
+                                "Failed to persist CDC cursor for removal"
+                            );
                         }
                     }
                     ChangeEvent::Initial { documents } => {
@@ -147,7 +202,6 @@ impl CdcWatcher {
                             count = documents.len(),
                             "Received initial document snapshot (not emitting CDC events)"
                         );
-                        // Initial snapshot is not emitted as CDC — only changes after observation starts
                     }
                 }
             }
@@ -192,7 +246,6 @@ fn hash_fields(
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     doc_id.hash(&mut hasher);
     timestamp_ms.hash(&mut hasher);
-    // Hash sorted keys + serialized values for determinism
     let mut keys: Vec<&String> = fields.keys().collect();
     keys.sort();
     for k in keys {

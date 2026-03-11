@@ -12,6 +12,7 @@ const ORGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("orgs");
 const FORMATIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("formations");
 const TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrollment_tokens");
 const SINKS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("cdc_sinks");
+const CURSORS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("cdc_cursors");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -31,6 +32,7 @@ impl RedbBackend {
             let _ = txn.open_table(FORMATIONS_TABLE)?;
             let _ = txn.open_table(TOKENS_TABLE)?;
             let _ = txn.open_table(SINKS_TABLE)?;
+            let _ = txn.open_table(CURSORS_TABLE)?;
         }
         txn.commit()?;
 
@@ -66,6 +68,11 @@ fn sink_key(org_id: &str, sink_id: &str) -> String {
 /// Prefix for all sinks in an org: "org_id\0"
 fn sink_prefix(org_id: &str) -> String {
     format!("{}\0", org_id)
+}
+
+/// Composite key for cursors: "org_id\0app_id\0document_id"
+fn cursor_key(org_id: &str, app_id: &str, document_id: &str) -> String {
+    format!("{}\0{}\0{}", org_id, app_id, document_id)
 }
 
 #[async_trait]
@@ -139,6 +146,26 @@ impl StorageBackend for RedbBackend {
             // Also remove all formations, tokens, and sinks for this org
             for table_def in [FORMATIONS_TABLE, TOKENS_TABLE, SINKS_TABLE] {
                 let mut table = txn.open_table(table_def)?;
+                let keys_to_remove: Vec<String> = {
+                    let iter = table.iter()?;
+                    iter.filter_map(|entry| {
+                        let (key, _) = entry.ok()?;
+                        let k = key.value().to_string();
+                        if k.starts_with(&prefix) {
+                            Some(k)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+                };
+                for key in keys_to_remove {
+                    table.remove(key.as_str())?;
+                }
+            }
+            // Also remove cursors (different value type)
+            {
+                let mut table = txn.open_table(CURSORS_TABLE)?;
                 let keys_to_remove: Vec<String> = {
                     let iter = table.iter()?;
                     iter.filter_map(|entry| {
@@ -375,6 +402,50 @@ impl StorageBackend for RedbBackend {
             Ok(removed)
         })
         .await?
+    }
+
+    // --- CDC cursors ---
+
+    async fn get_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+    ) -> Result<Option<String>> {
+        let db = self.db.clone();
+        let key = cursor_key(org_id, app_id, document_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(CURSORS_TABLE)?;
+            match table.get(key.as_str())? {
+                Some(value) => Ok(Some(value.value().to_string())),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn set_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+        change_hash: &str,
+    ) -> Result<()> {
+        let db = self.db.clone();
+        let key = cursor_key(org_id, app_id, document_id);
+        let hash = change_hash.to_string();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(CURSORS_TABLE)?;
+                table.insert(key.as_str(), hash.as_str())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
     }
 }
 

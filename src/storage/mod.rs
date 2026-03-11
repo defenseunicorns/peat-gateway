@@ -35,6 +35,21 @@ pub trait StorageBackend: Send + Sync {
     async fn list_sinks(&self, org_id: &str) -> Result<Vec<CdcSinkConfig>>;
     async fn update_sink(&self, sink: &CdcSinkConfig) -> Result<()>;
     async fn delete_sink(&self, org_id: &str, sink_id: &str) -> Result<bool>;
+
+    // CDC cursors — track last emitted change hash per document for replay on restart
+    async fn get_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+    ) -> Result<Option<String>>;
+    async fn set_cursor(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        document_id: &str,
+        change_hash: &str,
+    ) -> Result<()>;
 }
 
 pub async fn open(config: &StorageConfig) -> Result<Box<dyn StorageBackend>> {
