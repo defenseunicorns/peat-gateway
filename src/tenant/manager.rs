@@ -4,7 +4,8 @@ use anyhow::{bail, Result};
 use tracing::info;
 
 use super::models::{
-    CdcSinkConfig, CdcSinkType, EnrollmentToken, FormationConfig, OrgQuotas, Organization,
+    CdcSinkConfig, CdcSinkType, EnrollmentAuditEntry, EnrollmentToken, FormationConfig, IdpConfig,
+    OrgQuotas, Organization, PolicyRule,
 };
 use crate::config::GatewayConfig;
 use crate::storage::{self, StorageBackend};
@@ -323,5 +324,135 @@ impl TenantManager {
         self.store
             .set_cursor(org_id, app_id, document_id, change_hash)
             .await
+    }
+
+    // --- Identity Provider Configs ---
+
+    pub async fn create_idp(
+        &self,
+        org_id: &str,
+        issuer_url: String,
+        client_id: String,
+        client_secret: String,
+    ) -> Result<IdpConfig> {
+        self.get_org(org_id).await?;
+
+        let idp_id = {
+            let mut buf = [0u8; 8];
+            use rand_core::RngCore;
+            rand_core::OsRng.fill_bytes(&mut buf);
+            hex::encode(buf)
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let idp = IdpConfig {
+            idp_id: idp_id.clone(),
+            org_id: org_id.to_string(),
+            issuer_url,
+            client_id,
+            client_secret,
+            enabled: true,
+            created_at: now,
+        };
+
+        self.store.create_idp(&idp).await?;
+        info!(org_id = %org_id, idp_id = %idp_id, "Created IdP config");
+        Ok(idp)
+    }
+
+    pub async fn get_idp(&self, org_id: &str, idp_id: &str) -> Result<IdpConfig> {
+        self.store
+            .get_idp(org_id, idp_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("IdP '{}' not found in org '{}'", idp_id, org_id))
+    }
+
+    pub async fn list_idps(&self, org_id: &str) -> Result<Vec<IdpConfig>> {
+        self.get_org(org_id).await?;
+        self.store.list_idps(org_id).await
+    }
+
+    pub async fn toggle_idp(&self, org_id: &str, idp_id: &str, enabled: bool) -> Result<IdpConfig> {
+        let mut idp = self.get_idp(org_id, idp_id).await?;
+        idp.enabled = enabled;
+        self.store.update_idp(&idp).await?;
+        info!(org_id = %org_id, idp_id = %idp_id, enabled = enabled, "Updated IdP config");
+        Ok(idp)
+    }
+
+    pub async fn delete_idp(&self, org_id: &str, idp_id: &str) -> Result<()> {
+        if !self.store.delete_idp(org_id, idp_id).await? {
+            bail!("IdP '{}' not found in org '{}'", idp_id, org_id);
+        }
+        info!(org_id = %org_id, idp_id = %idp_id, "Deleted IdP config");
+        Ok(())
+    }
+
+    // --- Policy Rules ---
+
+    pub async fn create_policy_rule(
+        &self,
+        org_id: &str,
+        claim_key: String,
+        claim_value: String,
+        tier: super::models::MeshTier,
+        permissions: u32,
+        priority: u32,
+    ) -> Result<PolicyRule> {
+        self.get_org(org_id).await?;
+
+        let rule_id = {
+            let mut buf = [0u8; 8];
+            use rand_core::RngCore;
+            rand_core::OsRng.fill_bytes(&mut buf);
+            hex::encode(buf)
+        };
+
+        let rule = PolicyRule {
+            rule_id: rule_id.clone(),
+            org_id: org_id.to_string(),
+            claim_key,
+            claim_value,
+            tier,
+            permissions,
+            priority,
+        };
+
+        self.store.create_policy_rule(&rule).await?;
+        info!(org_id = %org_id, rule_id = %rule_id, "Created policy rule");
+        Ok(rule)
+    }
+
+    pub async fn list_policy_rules(&self, org_id: &str) -> Result<Vec<PolicyRule>> {
+        self.get_org(org_id).await?;
+        self.store.list_policy_rules(org_id).await
+    }
+
+    pub async fn delete_policy_rule(&self, org_id: &str, rule_id: &str) -> Result<()> {
+        if !self.store.delete_policy_rule(org_id, rule_id).await? {
+            bail!("Policy rule '{}' not found in org '{}'", rule_id, org_id);
+        }
+        info!(org_id = %org_id, rule_id = %rule_id, "Deleted policy rule");
+        Ok(())
+    }
+
+    // --- Enrollment Audit ---
+
+    pub async fn append_audit(&self, entry: &EnrollmentAuditEntry) -> Result<()> {
+        self.store.append_audit(entry).await
+    }
+
+    pub async fn list_audit(
+        &self,
+        org_id: &str,
+        app_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EnrollmentAuditEntry>> {
+        self.get_org(org_id).await?;
+        self.store.list_audit(org_id, app_id, limit).await
     }
 }

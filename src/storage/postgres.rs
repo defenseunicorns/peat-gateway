@@ -6,7 +6,10 @@ mod inner {
     use sqlx::{PgPool, Row};
 
     use crate::storage::StorageBackend;
-    use crate::tenant::models::{CdcSinkConfig, EnrollmentToken, FormationConfig, Organization};
+    use crate::tenant::models::{
+        CdcSinkConfig, EnrollmentAuditEntry, EnrollmentToken, FormationConfig, IdpConfig,
+        Organization, PolicyRule,
+    };
 
     pub struct PostgresBackend {
         pool: PgPool,
@@ -72,6 +75,44 @@ mod inner {
                     document_id TEXT NOT NULL,
                     change_hash TEXT NOT NULL,
                     PRIMARY KEY (org_id, app_id, document_id),
+                    FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await?;
+
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS idp_configs (
+                    org_id TEXT NOT NULL,
+                    idp_id TEXT NOT NULL,
+                    data JSONB NOT NULL,
+                    PRIMARY KEY (org_id, idp_id),
+                    FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await?;
+
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS policy_rules (
+                    org_id TEXT NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    data JSONB NOT NULL,
+                    PRIMARY KEY (org_id, rule_id),
+                    FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await?;
+
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS enrollment_audit (
+                    org_id TEXT NOT NULL,
+                    audit_id TEXT NOT NULL,
+                    app_id TEXT NOT NULL,
+                    timestamp_ms BIGINT NOT NULL,
+                    data JSONB NOT NULL,
+                    PRIMARY KEY (org_id, audit_id),
                     FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
                 )",
             )
@@ -323,6 +364,153 @@ mod inner {
                 .execute(&self.pool)
                 .await?;
             Ok(result.rows_affected() > 0)
+        }
+
+        // --- Identity provider configs ---
+
+        async fn create_idp(&self, idp: &IdpConfig) -> Result<()> {
+            let data = serde_json::to_value(idp)?;
+            sqlx::query("INSERT INTO idp_configs (org_id, idp_id, data) VALUES ($1, $2, $3)")
+                .bind(&idp.org_id)
+                .bind(&idp.idp_id)
+                .bind(&data)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+
+        async fn get_idp(&self, org_id: &str, idp_id: &str) -> Result<Option<IdpConfig>> {
+            let row = sqlx::query("SELECT data FROM idp_configs WHERE org_id = $1 AND idp_id = $2")
+                .bind(org_id)
+                .bind(idp_id)
+                .fetch_optional(&self.pool)
+                .await?;
+            match row {
+                Some(row) => {
+                    let data: serde_json::Value = row.get("data");
+                    Ok(Some(serde_json::from_value(data)?))
+                }
+                None => Ok(None),
+            }
+        }
+
+        async fn list_idps(&self, org_id: &str) -> Result<Vec<IdpConfig>> {
+            let rows =
+                sqlx::query("SELECT data FROM idp_configs WHERE org_id = $1 ORDER BY idp_id")
+                    .bind(org_id)
+                    .fetch_all(&self.pool)
+                    .await?;
+            let mut idps = Vec::with_capacity(rows.len());
+            for row in rows {
+                let data: serde_json::Value = row.get("data");
+                idps.push(serde_json::from_value(data)?);
+            }
+            Ok(idps)
+        }
+
+        async fn update_idp(&self, idp: &IdpConfig) -> Result<()> {
+            let data = serde_json::to_value(idp)?;
+            sqlx::query("UPDATE idp_configs SET data = $3 WHERE org_id = $1 AND idp_id = $2")
+                .bind(&idp.org_id)
+                .bind(&idp.idp_id)
+                .bind(&data)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+
+        async fn delete_idp(&self, org_id: &str, idp_id: &str) -> Result<bool> {
+            let result = sqlx::query("DELETE FROM idp_configs WHERE org_id = $1 AND idp_id = $2")
+                .bind(org_id)
+                .bind(idp_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(result.rows_affected() > 0)
+        }
+
+        // --- Policy rules ---
+
+        async fn create_policy_rule(&self, rule: &PolicyRule) -> Result<()> {
+            let data = serde_json::to_value(rule)?;
+            sqlx::query("INSERT INTO policy_rules (org_id, rule_id, data) VALUES ($1, $2, $3)")
+                .bind(&rule.org_id)
+                .bind(&rule.rule_id)
+                .bind(&data)
+                .execute(&self.pool)
+                .await?;
+            Ok(())
+        }
+
+        async fn list_policy_rules(&self, org_id: &str) -> Result<Vec<PolicyRule>> {
+            let rows =
+                sqlx::query("SELECT data FROM policy_rules WHERE org_id = $1 ORDER BY rule_id")
+                    .bind(org_id)
+                    .fetch_all(&self.pool)
+                    .await?;
+            let mut rules = Vec::with_capacity(rows.len());
+            for row in rows {
+                let data: serde_json::Value = row.get("data");
+                rules.push(serde_json::from_value(data)?);
+            }
+            Ok(rules)
+        }
+
+        async fn delete_policy_rule(&self, org_id: &str, rule_id: &str) -> Result<bool> {
+            let result = sqlx::query("DELETE FROM policy_rules WHERE org_id = $1 AND rule_id = $2")
+                .bind(org_id)
+                .bind(rule_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(result.rows_affected() > 0)
+        }
+
+        // --- Enrollment audit log ---
+
+        async fn append_audit(&self, entry: &EnrollmentAuditEntry) -> Result<()> {
+            let data = serde_json::to_value(entry)?;
+            sqlx::query(
+                "INSERT INTO enrollment_audit (org_id, audit_id, app_id, timestamp_ms, data) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(&entry.org_id)
+            .bind(&entry.audit_id)
+            .bind(&entry.app_id)
+            .bind(entry.timestamp_ms as i64)
+            .bind(&data)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        }
+
+        async fn list_audit(
+            &self,
+            org_id: &str,
+            app_id: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<EnrollmentAuditEntry>> {
+            let rows = if let Some(app_id) = app_id {
+                sqlx::query(
+                    "SELECT data FROM enrollment_audit WHERE org_id = $1 AND app_id = $2 ORDER BY timestamp_ms DESC LIMIT $3",
+                )
+                .bind(org_id)
+                .bind(app_id)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            } else {
+                sqlx::query(
+                    "SELECT data FROM enrollment_audit WHERE org_id = $1 ORDER BY timestamp_ms DESC LIMIT $2",
+                )
+                .bind(org_id)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            };
+            let mut entries = Vec::with_capacity(rows.len());
+            for row in rows {
+                let data: serde_json::Value = row.get("data");
+                entries.push(serde_json::from_value(data)?);
+            }
+            Ok(entries)
         }
 
         // --- CDC cursors ---

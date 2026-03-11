@@ -101,3 +101,76 @@ pub enum PeerStatus {
     Disconnected,
     Pending,
 }
+
+// --- Identity Federation ---
+
+/// OIDC identity provider configuration for an organization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdpConfig {
+    pub idp_id: String,
+    pub org_id: String,
+    /// OIDC issuer URL (used for discovery via .well-known/openid-configuration)
+    pub issuer_url: String,
+    /// OIDC client ID registered with the provider
+    pub client_id: String,
+    /// OIDC client secret (encrypted at rest in production)
+    pub client_secret: String,
+    /// Whether this IdP is active
+    pub enabled: bool,
+    pub created_at: u64,
+}
+
+/// Mesh tier assigned to an enrolled peer based on identity claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshTier {
+    Authority,
+    Infrastructure,
+    Endpoint,
+}
+
+/// Policy rule mapping an identity claim to a mesh tier and permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRule {
+    pub rule_id: String,
+    pub org_id: String,
+    /// Claim key to evaluate (e.g., "role", "group", "email_verified")
+    pub claim_key: String,
+    /// Expected claim value (e.g., "admin", "operators", "true")
+    pub claim_value: String,
+    /// Tier to assign when this rule matches
+    pub tier: MeshTier,
+    /// Permission bitmask (RELAY=0x01, EMERGENCY=0x02, ENROLL=0x04, ADMIN=0x08)
+    pub permissions: u32,
+    /// Rule priority — lower number = higher priority, first match wins
+    pub priority: u32,
+}
+
+/// Permission bit constants.
+pub mod permissions {
+    pub const RELAY: u32 = 0x01;
+    pub const EMERGENCY: u32 = 0x02;
+    pub const ENROLL: u32 = 0x04;
+    pub const ADMIN: u32 = 0x08;
+}
+
+/// Result of enrollment: decision + metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnrollmentDecision {
+    Approved { tier: MeshTier, permissions: u32 },
+    Denied { reason: String },
+}
+
+/// Audit log entry for every enrollment attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentAuditEntry {
+    pub audit_id: String,
+    pub org_id: String,
+    pub app_id: String,
+    /// IdP that processed the token
+    pub idp_id: String,
+    /// Subject from the ID token (sub claim)
+    pub subject: String,
+    /// The decision made
+    pub decision: EnrollmentDecision,
+    pub timestamp_ms: u64,
+}

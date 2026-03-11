@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+echo "pre-commit: checking formatting..."
+cargo fmt -- --check
+if [ $? -ne 0 ]; then
+    echo "pre-commit: cargo fmt --check failed. Run 'cargo fmt' and re-commit."
+    exit 1
+fi
+
+echo "pre-commit: running clippy..."
+cargo clippy --all-features -- -D warnings 2>&1
+if [ $? -ne 0 ]; then
+    echo "pre-commit: clippy failed. Fix warnings and re-commit."
+    exit 1
+fi

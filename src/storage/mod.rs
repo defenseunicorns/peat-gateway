@@ -5,7 +5,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::config::StorageConfig;
-use crate::tenant::models::{CdcSinkConfig, EnrollmentToken, FormationConfig, Organization};
+use crate::tenant::models::{
+    CdcSinkConfig, EnrollmentAuditEntry, EnrollmentToken, FormationConfig, IdpConfig, Organization,
+    PolicyRule,
+};
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
@@ -35,6 +38,27 @@ pub trait StorageBackend: Send + Sync {
     async fn list_sinks(&self, org_id: &str) -> Result<Vec<CdcSinkConfig>>;
     async fn update_sink(&self, sink: &CdcSinkConfig) -> Result<()>;
     async fn delete_sink(&self, org_id: &str, sink_id: &str) -> Result<bool>;
+
+    // Identity provider configs
+    async fn create_idp(&self, idp: &IdpConfig) -> Result<()>;
+    async fn get_idp(&self, org_id: &str, idp_id: &str) -> Result<Option<IdpConfig>>;
+    async fn list_idps(&self, org_id: &str) -> Result<Vec<IdpConfig>>;
+    async fn update_idp(&self, idp: &IdpConfig) -> Result<()>;
+    async fn delete_idp(&self, org_id: &str, idp_id: &str) -> Result<bool>;
+
+    // Policy rules
+    async fn create_policy_rule(&self, rule: &PolicyRule) -> Result<()>;
+    async fn list_policy_rules(&self, org_id: &str) -> Result<Vec<PolicyRule>>;
+    async fn delete_policy_rule(&self, org_id: &str, rule_id: &str) -> Result<bool>;
+
+    // Enrollment audit log
+    async fn append_audit(&self, entry: &EnrollmentAuditEntry) -> Result<()>;
+    async fn list_audit(
+        &self,
+        org_id: &str,
+        app_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EnrollmentAuditEntry>>;
 
     // CDC cursors — track last emitted change hash per document for replay on restart
     async fn get_cursor(
