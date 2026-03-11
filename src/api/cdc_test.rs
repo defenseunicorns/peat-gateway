@@ -53,7 +53,7 @@ async fn publish_test_event(
 
     let change_hash = format!(
         "test-{}",
-        hex::encode(&rand_core::OsRng.next_u64().to_le_bytes())
+        hex::encode(rand_core::OsRng.next_u64().to_le_bytes())
     );
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
