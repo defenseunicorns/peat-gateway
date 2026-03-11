@@ -426,9 +426,16 @@ async fn delete_org_cascades_identity_data() {
     )
     .await
     .unwrap();
-    mgr.create_policy_rule("acme", "role".into(), "admin".into(), MeshTier::Authority, 15, 10)
-        .await
-        .unwrap();
+    mgr.create_policy_rule(
+        "acme",
+        "role".into(),
+        "admin".into(),
+        MeshTier::Authority,
+        15,
+        10,
+    )
+    .await
+    .unwrap();
 
     mgr.delete_org("acme").await.unwrap();
 
@@ -462,9 +469,16 @@ async fn policy_rules_sorted_by_priority() {
     .await
     .unwrap();
 
-    mgr.create_policy_rule("acme", "role".into(), "admin".into(), MeshTier::Authority, 15, 10)
-        .await
-        .unwrap();
+    mgr.create_policy_rule(
+        "acme",
+        "role".into(),
+        "admin".into(),
+        MeshTier::Authority,
+        15,
+        10,
+    )
+    .await
+    .unwrap();
 
     let rules = mgr.list_policy_rules("acme").await.unwrap();
     assert_eq!(rules.len(), 2);
