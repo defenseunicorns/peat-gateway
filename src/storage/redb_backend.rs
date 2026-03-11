@@ -6,13 +6,19 @@ use async_trait::async_trait;
 use redb::{Database, ReadableTable, TableDefinition};
 
 use super::StorageBackend;
-use crate::tenant::models::{CdcSinkConfig, EnrollmentToken, FormationConfig, Organization};
+use crate::tenant::models::{
+    CdcSinkConfig, EnrollmentAuditEntry, EnrollmentToken, FormationConfig, IdpConfig, Organization,
+    PolicyRule,
+};
 
 const ORGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("orgs");
 const FORMATIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("formations");
 const TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrollment_tokens");
 const SINKS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("cdc_sinks");
 const CURSORS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("cdc_cursors");
+const IDPS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("idp_configs");
+const POLICY_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_rules");
+const AUDIT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrollment_audit");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -33,6 +39,9 @@ impl RedbBackend {
             let _ = txn.open_table(TOKENS_TABLE)?;
             let _ = txn.open_table(SINKS_TABLE)?;
             let _ = txn.open_table(CURSORS_TABLE)?;
+            let _ = txn.open_table(IDPS_TABLE)?;
+            let _ = txn.open_table(POLICY_RULES_TABLE)?;
+            let _ = txn.open_table(AUDIT_TABLE)?;
         }
         txn.commit()?;
 
@@ -73,6 +82,21 @@ fn sink_prefix(org_id: &str) -> String {
 /// Composite key for cursors: "org_id\0app_id\0document_id"
 fn cursor_key(org_id: &str, app_id: &str, document_id: &str) -> String {
     format!("{}\0{}\0{}", org_id, app_id, document_id)
+}
+
+/// Composite key for IdP configs: "org_id\0idp_id"
+fn idp_key(org_id: &str, idp_id: &str) -> String {
+    format!("{}\0{}", org_id, idp_id)
+}
+
+/// Composite key for policy rules: "org_id\0rule_id"
+fn policy_rule_key(org_id: &str, rule_id: &str) -> String {
+    format!("{}\0{}", org_id, rule_id)
+}
+
+/// Composite key for audit entries: "org_id\0timestamp_ms\0audit_id" (for time-ordered scan)
+fn audit_key(org_id: &str, timestamp_ms: u64, audit_id: &str) -> String {
+    format!("{}\0{:020}\0{}", org_id, timestamp_ms, audit_id)
 }
 
 #[async_trait]
@@ -143,8 +167,15 @@ impl StorageBackend for RedbBackend {
                 let val = table.remove(org_id.as_str())?;
                 val.is_some()
             };
-            // Also remove all formations, tokens, and sinks for this org
-            for table_def in [FORMATIONS_TABLE, TOKENS_TABLE, SINKS_TABLE] {
+            // Also remove all formations, tokens, sinks, idps, policy rules, and audit for this org
+            for table_def in [
+                FORMATIONS_TABLE,
+                TOKENS_TABLE,
+                SINKS_TABLE,
+                IDPS_TABLE,
+                POLICY_RULES_TABLE,
+                AUDIT_TABLE,
+            ] {
                 let mut table = txn.open_table(table_def)?;
                 let keys_to_remove: Vec<String> = {
                     let iter = table.iter()?;
@@ -400,6 +431,184 @@ impl StorageBackend for RedbBackend {
             };
             txn.commit()?;
             Ok(removed)
+        })
+        .await?
+    }
+
+    // --- Identity provider configs ---
+
+    async fn create_idp(&self, idp: &IdpConfig) -> Result<()> {
+        let bytes = serde_json::to_vec(idp)?;
+        let key = idp_key(&idp.org_id, &idp.idp_id);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(IDPS_TABLE)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn get_idp(&self, org_id: &str, idp_id: &str) -> Result<Option<IdpConfig>> {
+        let db = self.db.clone();
+        let key = idp_key(org_id, idp_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(IDPS_TABLE)?;
+            match table.get(key.as_str())? {
+                Some(value) => Ok(Some(serde_json::from_slice(value.value())?)),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn list_idps(&self, org_id: &str) -> Result<Vec<IdpConfig>> {
+        let db = self.db.clone();
+        let prefix = format!("{}\0", org_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(IDPS_TABLE)?;
+            let mut idps = Vec::new();
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                if key.value().starts_with(&prefix) {
+                    idps.push(serde_json::from_slice(value.value())?);
+                }
+            }
+            Ok(idps)
+        })
+        .await?
+    }
+
+    async fn update_idp(&self, idp: &IdpConfig) -> Result<()> {
+        self.create_idp(idp).await
+    }
+
+    async fn delete_idp(&self, org_id: &str, idp_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = idp_key(org_id, idp_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            let removed = {
+                let mut table = txn.open_table(IDPS_TABLE)?;
+                let val = table.remove(key.as_str())?;
+                val.is_some()
+            };
+            txn.commit()?;
+            Ok(removed)
+        })
+        .await?
+    }
+
+    // --- Policy rules ---
+
+    async fn create_policy_rule(&self, rule: &PolicyRule) -> Result<()> {
+        let bytes = serde_json::to_vec(rule)?;
+        let key = policy_rule_key(&rule.org_id, &rule.rule_id);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(POLICY_RULES_TABLE)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn list_policy_rules(&self, org_id: &str) -> Result<Vec<PolicyRule>> {
+        let db = self.db.clone();
+        let prefix = format!("{}\0", org_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(POLICY_RULES_TABLE)?;
+            let mut rules = Vec::new();
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                if key.value().starts_with(&prefix) {
+                    rules.push(serde_json::from_slice(value.value())?);
+                }
+            }
+            Ok(rules)
+        })
+        .await?
+    }
+
+    async fn delete_policy_rule(&self, org_id: &str, rule_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = policy_rule_key(org_id, rule_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            let removed = {
+                let mut table = txn.open_table(POLICY_RULES_TABLE)?;
+                let val = table.remove(key.as_str())?;
+                val.is_some()
+            };
+            txn.commit()?;
+            Ok(removed)
+        })
+        .await?
+    }
+
+    // --- Enrollment audit log ---
+
+    async fn append_audit(&self, entry: &EnrollmentAuditEntry) -> Result<()> {
+        let bytes = serde_json::to_vec(entry)?;
+        let key = audit_key(&entry.org_id, entry.timestamp_ms, &entry.audit_id);
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(AUDIT_TABLE)?;
+                table.insert(key.as_str(), bytes.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn list_audit(
+        &self,
+        org_id: &str,
+        app_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EnrollmentAuditEntry>> {
+        let db = self.db.clone();
+        let prefix = format!("{}\0", org_id);
+        let app_id = app_id.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(AUDIT_TABLE)?;
+            let mut entries = Vec::new();
+            // Iterate in reverse (newest first) since keys are time-ordered
+            for entry in table.iter()?.rev() {
+                let (key, value) = entry?;
+                if !key.value().starts_with(&prefix) {
+                    continue;
+                }
+                let e: EnrollmentAuditEntry = serde_json::from_slice(value.value())?;
+                if let Some(ref filter_app) = app_id {
+                    if &e.app_id != filter_app {
+                        continue;
+                    }
+                }
+                entries.push(e);
+                if entries.len() >= limit {
+                    break;
+                }
+            }
+            Ok(entries)
         })
         .await?
     }

@@ -1,6 +1,8 @@
 mod cdc_test;
+mod enroll;
 mod formations;
 mod health;
+mod identity;
 mod orgs;
 mod sinks;
 mod tokens;
@@ -21,6 +23,8 @@ pub fn app(tenant_mgr: TenantManager) -> Router {
         .nest("/orgs", orgs::router(tenant_mgr.clone()))
         .nest("/orgs", tokens::router(tenant_mgr.clone()))
         .nest("/orgs", sinks::router(tenant_mgr.clone()))
+        .nest("/orgs", identity::router(tenant_mgr.clone()))
+        .nest("/orgs", enroll::router(tenant_mgr.clone()))
         .nest("/orgs", formations::router(tenant_mgr))
         .merge(health::router())
 }
