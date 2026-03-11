@@ -1,0 +1,30 @@
+kind: ZarfPackageConfig
+metadata:
+  name: peat-gateway
+  description: Enterprise control plane for Peat mesh — multi-org tenancy, CDC, IDAM federation
+  version: 0.1.0
+  url: https://github.com/defenseunicorns/peat-gateway
+  architecture: amd64
+
+components:
+  - name: peat-gateway
+    required: true
+    description: Deploy peat-gateway control plane
+    images:
+      - ghcr.io/defenseunicorns/peat-gateway:latest
+    charts:
+      - name: peat-gateway
+        localPath: chart/peat-gateway
+        namespace: peat-system
+        version: 0.1.0
+        valuesFiles:
+          - chart/peat-gateway/values.yaml
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: deployment
+                name: peat-gateway
+                namespace: peat-system
+                condition: available

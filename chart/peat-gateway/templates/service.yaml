@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "peat-gateway.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "peat-gateway.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "peat-gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: iroh-quic
+      port: 11204
+      targetPort: iroh-quic
+      protocol: UDP
+    - name: enrollment
+      port: 11205
+      targetPort: enrollment
+      protocol: TCP

@@ -1,0 +1,103 @@
+{{- if .Values.package.enabled }}
+apiVersion: uds.dev/v1alpha1
+kind: Package
+metadata:
+  name: peat-gateway
+  namespace: {{ .Release.Namespace }}
+spec:
+  network:
+    expose:
+      - service: {{ include "peat-gateway.fullname" . }}
+        gateway: tenant
+        host: peat
+        port: 8080
+    allow:
+      # Iroh QUIC mesh sync (bidirectional)
+      - direction: Ingress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteGenerated: Anywhere
+        port: 11204
+        description: "Iroh QUIC mesh sync"
+      - direction: Egress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteGenerated: Anywhere
+        port: 11204
+        description: "Iroh QUIC mesh sync"
+      # Enrollment protocol
+      - direction: Ingress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        port: 11205
+        description: "Peer enrollment protocol"
+      {{- if .Values.cdc.nats.url }}
+      # NATS CDC sink
+      - direction: Egress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteNamespace: nats
+        port: 4222
+        description: "CDC events to NATS"
+      {{- end }}
+      {{- if .Values.cdc.kafka.brokers }}
+      # Kafka CDC sink
+      - direction: Egress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteNamespace: kafka
+        port: 9092
+        description: "CDC events to Kafka"
+      {{- end }}
+      {{- if .Values.sso.enabled }}
+      # Keycloak OIDC
+      - direction: Egress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteNamespace: keycloak
+        port: 8080
+        description: "OIDC token introspection"
+      {{- end }}
+      {{- if eq .Values.storage.backend "postgres" }}
+      # Postgres
+      - direction: Egress
+        selector:
+          app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+        remoteNamespace: postgres
+        port: 5432
+        description: "Postgres storage backend"
+      {{- end }}
+      {{- with .Values.package.additionalNetworkAllow }}
+      {{ toYaml . | nindent 6 }}
+      {{- end }}
+    {{- if .Values.package.serviceMeshMode }}
+    serviceMesh:
+      mode: {{ .Values.package.serviceMeshMode }}
+    {{- end }}
+  {{- if .Values.sso.enabled }}
+  sso:
+    - name: peat-gateway
+      clientId: {{ .Values.sso.clientId }}
+      redirectUris:
+        - {{ .Values.sso.redirectUri | quote }}
+      groups:
+        peat-admin:
+          description: "Full gateway admin access"
+        peat-org-admin:
+          description: "Org-scoped admin access"
+        peat-viewer:
+          description: "Read-only access"
+  {{- end }}
+  {{- if .Values.metrics.enabled }}
+  monitor:
+    - selector:
+        app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+      podSelector:
+        app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
+      portName: http
+      targetPort: 8080
+      description: "Peat Gateway Prometheus metrics"
+      kind: ServiceMonitor
+      path: {{ .Values.metrics.path }}
+  {{- end }}
+{{- end }}

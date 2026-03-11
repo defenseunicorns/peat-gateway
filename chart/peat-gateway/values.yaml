@@ -1,0 +1,78 @@
+# peat-gateway Helm chart values
+
+# -- Container image settings
+image:
+  repository: ghcr.io/defenseunicorns/peat-gateway
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Number of replicas (use 1 with redb, >1 requires postgres)
+replicaCount: 1
+
+# -- Storage backend: "redb" (embedded, single-node) or "postgres"
+storage:
+  backend: redb
+  postgres:
+    # Connection string (ignored when backend=redb)
+    url: "postgres://peat:peat@postgres-rw.postgres.svc:5432/peat_gateway"
+    # Use existing secret for connection string (key: url)
+    existingSecret: ""
+
+# -- Persistent storage for redb database and Iroh state
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+# -- CDC sink configuration
+cdc:
+  nats:
+    # NATS server URL (empty = NATS sink disabled)
+    url: ""
+  kafka:
+    # Kafka broker list (empty = Kafka sink disabled)
+    brokers: ""
+
+# -- Prometheus metrics
+metrics:
+  enabled: true
+  port: 8080
+  path: /metrics
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+# -- Pod resource requests and limits
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# -- Pod scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- UDS Package CR
+package:
+  enabled: false
+  serviceMeshMode: ""
+  additionalNetworkAllow: []
+
+# -- SSO configuration (requires UDS Core Keycloak)
+sso:
+  enabled: false
+  issuerUri: "https://sso.uds.dev/realms/uds"
+  clientId: uds-peat-gateway
+  redirectUri: "https://peat.{{ .Values.domain }}/auth/callback"

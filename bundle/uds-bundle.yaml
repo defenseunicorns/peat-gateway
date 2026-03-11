@@ -1,0 +1,15 @@
+kind: UDSBundle
+metadata:
+  name: peat-gateway
+  description: UDS bundle for deploying peat-gateway with UDS Operator integration
+  version: 0.1.0
+packages:
+  - name: peat-gateway
+    path: ..
+    ref: 0.1.0
+    overrides:
+      peat-gateway:
+        peat-gateway:
+          values:
+            - path: package.enabled
+              value: true
