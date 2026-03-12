@@ -92,6 +92,11 @@ pub fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8>> {
     Ok(envelope)
 }
 
+/// Returns `true` if `data` starts with the envelope magic header.
+pub fn is_envelope(data: &[u8]) -> bool {
+    data.len() >= FIXED_HEADER && &data[..4] == MAGIC
+}
+
 /// Decrypt an envelope produced by [`seal`]. Returns the original plaintext.
 ///
 /// If `data` does not start with the envelope magic bytes, returns `None`

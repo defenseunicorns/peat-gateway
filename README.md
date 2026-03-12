@@ -103,10 +103,16 @@ cargo fmt --check && cargo clippy -- -D warnings
 # Minimal — in-memory state, no CDC sinks
 peat-gateway
 
+# Explicit serve subcommand (equivalent to above)
+peat-gateway serve
+
 # With NATS CDC and custom bind address
 PEAT_GATEWAY_BIND=0.0.0.0:8080 \
 PEAT_CDC_NATS_URL=nats://localhost:4222 \
 peat-gateway
+
+# Encrypt all plaintext genesis records after enabling PEAT_KEK
+PEAT_KEK=<64-hex-chars> peat-gateway migrate-keys
 ```
 
 ### Environment variables
