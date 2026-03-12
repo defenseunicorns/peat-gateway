@@ -19,6 +19,10 @@ fn base_config(db_path: &std::path::Path) -> GatewayConfig {
         },
         ui_dir: None,
         kek: None,
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     }
 }
 
@@ -127,6 +131,10 @@ async fn migrate_skips_already_encrypted_records() {
         },
         ui_dir: None,
         kek: Some(kek_hex.clone()),
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     };
 
     {
@@ -305,9 +313,10 @@ async fn migrate_fails_without_kek() {
 
     let result = peat_gateway::cli::migrate_keys(&config, false).await;
     assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
     assert!(
-        result.unwrap_err().to_string().contains("PEAT_KEK"),
-        "Error should mention PEAT_KEK"
+        err_msg.contains("PEAT_KEK") || err_msg.contains("No key provider configured"),
+        "Error should mention key provider configuration"
     );
 }
 

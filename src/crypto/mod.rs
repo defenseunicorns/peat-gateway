@@ -5,13 +5,25 @@
 //! The [`seal`] and [`open`] functions handle the envelope format and are agnostic
 //! to where the KEK lives.
 
+#[cfg(feature = "aws-kms")]
+mod kms;
 mod local;
+#[cfg(feature = "vault")]
+mod vault;
+
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use rand_core::RngCore;
 
+#[cfg(feature = "aws-kms")]
+pub use kms::AwsKmsProvider;
 pub use local::LocalKeyProvider;
+#[cfg(feature = "vault")]
+pub use vault::VaultTransitProvider;
+
+use crate::config::GatewayConfig;
 
 // ── Trait ────────────────────────────────────────────────────────────────────
 
@@ -98,6 +110,62 @@ pub async fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8
 /// Returns `true` if `data` starts with the envelope magic header.
 pub fn is_envelope(data: &[u8]) -> bool {
     data.len() >= FIXED_HEADER && &data[..4] == MAGIC
+}
+
+/// Build a key provider from configuration.
+///
+/// Priority: KMS (if `aws-kms` feature + `kms_key_arn` set) → Vault (if `vault`
+/// feature + `vault_addr` set) → Local (if `kek` set) → Plaintext.
+///
+/// Returns `(provider, encrypt_enabled)`.
+pub async fn build_key_provider(config: &GatewayConfig) -> Result<(Arc<dyn KeyProvider>, bool)> {
+    // AWS KMS
+    if let Some(ref arn) = config.kms_key_arn {
+        #[cfg(feature = "aws-kms")]
+        {
+            let provider = AwsKmsProvider::from_env(arn.clone()).await?;
+            tracing::info!("Genesis envelope encryption enabled (AWS KMS)");
+            return Ok((Arc::new(provider), true));
+        }
+        #[cfg(not(feature = "aws-kms"))]
+        {
+            let _ = arn;
+            bail!("PEAT_KMS_KEY_ARN is set but the `aws-kms` feature is not compiled in");
+        }
+    }
+
+    // Vault Transit
+    if let Some(ref addr) = config.vault_addr {
+        #[cfg(feature = "vault")]
+        {
+            let token = config.vault_token.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("PEAT_VAULT_ADDR is set but PEAT_VAULT_TOKEN is missing")
+            })?;
+            let key_name = config
+                .vault_transit_key
+                .as_deref()
+                .unwrap_or("peat-gateway");
+            let provider = VaultTransitProvider::new(addr, token, key_name)?;
+            tracing::info!("Genesis envelope encryption enabled (Vault Transit)");
+            return Ok((Arc::new(provider), true));
+        }
+        #[cfg(not(feature = "vault"))]
+        {
+            let _ = addr;
+            bail!("PEAT_VAULT_ADDR is set but the `vault` feature is not compiled in");
+        }
+    }
+
+    // Local KEK
+    if let Some(ref kek_hex) = config.kek {
+        let provider = LocalKeyProvider::from_hex(kek_hex)?;
+        tracing::info!("Genesis envelope encryption enabled (local KEK)");
+        return Ok((Arc::new(provider), true));
+    }
+
+    // Plaintext fallback
+    tracing::info!("Genesis envelope encryption disabled (no key provider configured)");
+    Ok((Arc::new(PlaintextProvider), false))
 }
 
 /// Decrypt an envelope produced by [`seal`]. Returns the original plaintext.

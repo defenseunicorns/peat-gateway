@@ -75,7 +75,9 @@ kafka = ["dep:rdkafka"]
 webhook = ["dep:reqwest"]
 oidc = ["dep:openidconnect"]
 postgres = ["dep:sqlx"]
-full = ["nats", "kafka", "webhook", "oidc", "postgres"]
+aws-kms = []
+vault = []
+full = ["nats", "kafka", "webhook", "oidc", "postgres", "aws-kms", "vault"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
