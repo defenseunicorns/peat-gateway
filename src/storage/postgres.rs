@@ -106,6 +106,18 @@ mod inner {
             .await?;
 
             sqlx::query(
+                "CREATE TABLE IF NOT EXISTS genesis (
+                    org_id TEXT NOT NULL,
+                    app_id TEXT NOT NULL,
+                    data BYTEA NOT NULL,
+                    PRIMARY KEY (org_id, app_id),
+                    FOREIGN KEY (org_id) REFERENCES orgs(org_id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await?;
+
+            sqlx::query(
                 "CREATE TABLE IF NOT EXISTS enrollment_audit (
                     org_id TEXT NOT NULL,
                     audit_id TEXT NOT NULL,
@@ -511,6 +523,39 @@ mod inner {
                 entries.push(serde_json::from_value(data)?);
             }
             Ok(entries)
+        }
+
+        // --- Genesis key material ---
+
+        async fn store_genesis(&self, org_id: &str, app_id: &str, encoded: &[u8]) -> Result<()> {
+            sqlx::query(
+                "INSERT INTO genesis (org_id, app_id, data) VALUES ($1, $2, $3)
+                 ON CONFLICT (org_id, app_id) DO UPDATE SET data = EXCLUDED.data",
+            )
+            .bind(org_id)
+            .bind(app_id)
+            .bind(encoded)
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        }
+
+        async fn get_genesis(&self, org_id: &str, app_id: &str) -> Result<Option<Vec<u8>>> {
+            let row = sqlx::query("SELECT data FROM genesis WHERE org_id = $1 AND app_id = $2")
+                .bind(org_id)
+                .bind(app_id)
+                .fetch_optional(&self.pool)
+                .await?;
+            Ok(row.map(|r| r.get("data")))
+        }
+
+        async fn delete_genesis(&self, org_id: &str, app_id: &str) -> Result<bool> {
+            let result = sqlx::query("DELETE FROM genesis WHERE org_id = $1 AND app_id = $2")
+                .bind(org_id)
+                .bind(app_id)
+                .execute(&self.pool)
+                .await?;
+            Ok(result.rows_affected() > 0)
         }
 
         // --- CDC cursors ---

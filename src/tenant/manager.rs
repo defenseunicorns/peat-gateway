@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use peat_mesh::security::{MembershipPolicy, MeshGenesis};
 use tracing::info;
 
 use super::models::{
@@ -115,13 +116,17 @@ impl TenantManager {
             bail!("Formation '{}' already exists in org '{}'", app_id, org_id);
         }
 
-        // Generate mesh_id from a random seed (first 8 hex chars)
-        let mesh_id = {
-            let mut buf = [0u8; 4];
-            use rand_core::RngCore;
-            rand_core::OsRng.fill_bytes(&mut buf);
-            hex::encode(buf)
+        // Map enrollment policy to mesh membership policy
+        let mesh_policy = match &enrollment_policy {
+            super::models::EnrollmentPolicy::Open => MembershipPolicy::Open,
+            super::models::EnrollmentPolicy::Controlled => MembershipPolicy::Controlled,
+            super::models::EnrollmentPolicy::Strict => MembershipPolicy::Strict,
         };
+
+        // Create genesis — derives mesh_id, authority keypair, formation secret
+        let genesis = MeshGenesis::create(&app_id, mesh_policy);
+        let mesh_id = genesis.mesh_id();
+        let encoded = genesis.encode();
 
         let formation = FormationConfig {
             app_id: app_id.clone(),
@@ -130,6 +135,7 @@ impl TenantManager {
         };
 
         self.store.create_formation(org_id, &formation).await?;
+        self.store.store_genesis(org_id, &app_id, &encoded).await?;
         info!(org_id = %org_id, app_id = %app_id, mesh_id = %mesh_id, "Created formation");
         Ok(formation)
     }
@@ -151,8 +157,32 @@ impl TenantManager {
         if !self.store.delete_formation(org_id, app_id).await? {
             bail!("Formation '{}' not found in org '{}'", app_id, org_id);
         }
+        let _ = self.store.delete_genesis(org_id, app_id).await;
         info!(org_id = %org_id, app_id = %app_id, "Deleted formation");
         Ok(())
+    }
+
+    pub async fn load_genesis(&self, org_id: &str, app_id: &str) -> Result<MeshGenesis> {
+        let bytes = self
+            .store
+            .get_genesis(org_id, app_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Genesis not found for formation '{}' in org '{}'",
+                    app_id,
+                    org_id
+                )
+            })?;
+        MeshGenesis::decode(&bytes).map_err(|e| anyhow::anyhow!("Failed to decode genesis: {e}"))
+    }
+
+    pub async fn count_recent_enrollments(&self, org_id: &str, since_ms: u64) -> Result<usize> {
+        let entries = self.store.list_audit(org_id, None, usize::MAX).await?;
+        Ok(entries
+            .iter()
+            .filter(|e| e.timestamp_ms >= since_ms)
+            .count())
     }
 
     // --- Enrollment Tokens ---

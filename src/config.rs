@@ -10,6 +10,8 @@ pub struct GatewayConfig {
     pub storage: StorageConfig,
     /// CDC configuration
     pub cdc: CdcConfig,
+    /// Optional directory to serve the admin UI from
+    pub ui_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +54,7 @@ impl GatewayConfig {
                 nats_url: env::var("PEAT_CDC_NATS_URL").ok(),
                 kafka_brokers: env::var("PEAT_CDC_KAFKA_BROKERS").ok(),
             },
+            ui_dir: env::var("PEAT_UI_DIR").ok(),
         })
     }
 }

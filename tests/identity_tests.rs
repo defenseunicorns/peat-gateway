@@ -23,6 +23,7 @@ async fn setup() -> (TenantManager, axum::Router, tempfile::TempDir) {
             nats_url: None,
             kafka_brokers: None,
         },
+        ui_dir: None,
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
@@ -483,4 +484,231 @@ async fn policy_rules_sorted_by_priority() {
     let rules = mgr.list_policy_rules("acme").await.unwrap();
     assert_eq!(rules.len(), 2);
     // The rules are stored but sorting happens at evaluation time (in enroll.rs)
+}
+
+// ── Certificate issuance: Open formation with key material ───
+
+#[tokio::test]
+async fn enroll_open_formation_issues_certificate() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    let formation = mgr
+        .create_formation("acme", "mesh-open".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    // Generate a device keypair for enrollment
+    let device = peat_mesh::security::DeviceKeypair::generate();
+    let pk_hex = hex::encode(device.public_key_bytes());
+
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-open/enroll",
+            Some(json!({
+                "public_key": pk_hex,
+                "node_id": "tactical-west-1"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["decision"]["Approved"]["tier"], "Endpoint");
+
+    // Certificate should be present
+    let cert_hex = body["certificate"]
+        .as_str()
+        .expect("certificate should be present");
+    let cert_bytes = hex::decode(cert_hex).unwrap();
+    let cert = peat_mesh::security::MeshCertificate::decode(&cert_bytes).unwrap();
+
+    // Verify signature
+    assert!(cert.verify().is_ok());
+
+    // Verify cert fields
+    assert_eq!(cert.subject_public_key, device.public_key_bytes());
+    assert_eq!(cert.node_id, "tactical-west-1");
+    assert_eq!(cert.mesh_id, formation.mesh_id);
+
+    // mesh_id and authority_public_key should be returned
+    assert_eq!(body["mesh_id"].as_str().unwrap(), formation.mesh_id);
+    assert!(body["authority_public_key"].as_str().is_some());
+}
+
+// ── Certificate issuance: backwards compat (no key material) ─
+
+#[tokio::test]
+async fn enroll_open_without_key_material_returns_no_cert() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-open".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-open/enroll",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["decision"]["Approved"]["tier"], "Endpoint");
+    assert!(body["certificate"].is_null());
+    assert!(body["mesh_id"].is_null());
+}
+
+// ── Enrollment rate limiting ─────────────────────────────────
+
+#[tokio::test]
+async fn enroll_rate_limited() {
+    let (mgr, app, _dir) = setup().await;
+    let mut org = mgr
+        .create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+
+    // Set quota to 2 enrollments per hour
+    org.quotas.max_enrollments_per_hour = 2;
+    mgr.update_org("acme", None, Some(org.quotas))
+        .await
+        .unwrap();
+
+    mgr.create_formation("acme", "mesh-open".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    // First two enrollments should succeed
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/orgs/acme/formations/mesh-open/enroll",
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Third should be rate limited
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-open/enroll",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+// ── Invalid public key returns 400 ──────────────────────────
+
+#[tokio::test]
+async fn enroll_with_invalid_public_key_is_bad_request() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-open".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    // Too short
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-open/enroll",
+            Some(json!({
+                "public_key": "abcd",
+                "node_id": "test-node"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Not valid hex
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-open/enroll",
+            Some(json!({
+                "public_key": "zzzz",
+                "node_id": "test-node"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Certificate has correct tier and permissions ─────────────
+
+#[tokio::test]
+async fn enroll_certificate_has_correct_tier_and_permissions() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    // Create a policy rule: role=admin → Authority tier, all permissions (0x0F)
+    mgr.create_policy_rule(
+        "acme",
+        "role".into(),
+        "admin".into(),
+        MeshTier::Authority,
+        0x0F, // RELAY|EMERGENCY|ENROLL|ADMIN
+        10,
+    )
+    .await
+    .unwrap();
+
+    // For Open formations, policy rules aren't evaluated (defaults to Endpoint, 0 perms).
+    // But we can still verify the tier/perms mapping works on the cert.
+    let device = peat_mesh::security::DeviceKeypair::generate();
+    let pk_hex = hex::encode(device.public_key_bytes());
+
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/orgs/acme/formations/mesh-ctrl/enroll",
+            Some(json!({
+                "public_key": pk_hex,
+                "node_id": "edge-device-1"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    // Open formation → Endpoint tier, 0 permissions
+    let cert_hex = body["certificate"].as_str().unwrap();
+    let cert =
+        peat_mesh::security::MeshCertificate::decode(&hex::decode(cert_hex).unwrap()).unwrap();
+
+    // Gateway Endpoint → Mesh Tactical
+    assert_eq!(cert.tier, peat_mesh::security::MeshTier::Tactical);
+    // 0 gateway perms → 0 mesh perms
+    assert_eq!(cert.permissions, 0);
+    assert!(cert.verify().is_ok());
 }

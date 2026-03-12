@@ -34,6 +34,12 @@ pub struct OrgQuotas {
     pub max_peers_per_formation: u32,
     pub max_documents_per_formation: u32,
     pub max_cdc_sinks: u32,
+    #[serde(default = "default_max_enrollments_per_hour")]
+    pub max_enrollments_per_hour: u32,
+}
+
+fn default_max_enrollments_per_hour() -> u32 {
+    1000
 }
 
 impl Default for OrgQuotas {
@@ -43,6 +49,7 @@ impl Default for OrgQuotas {
             max_peers_per_formation: 100,
             max_documents_per_formation: 10_000,
             max_cdc_sinks: 5,
+            max_enrollments_per_hour: 1000,
         }
     }
 }
@@ -145,12 +152,43 @@ pub struct PolicyRule {
     pub priority: u32,
 }
 
-/// Permission bit constants.
+impl MeshTier {
+    /// Map gateway tier to peat-mesh wire tier.
+    pub fn to_mesh_tier(self) -> peat_mesh::security::MeshTier {
+        match self {
+            MeshTier::Authority => peat_mesh::security::MeshTier::Enterprise,
+            MeshTier::Infrastructure => peat_mesh::security::MeshTier::Regional,
+            MeshTier::Endpoint => peat_mesh::security::MeshTier::Tactical,
+        }
+    }
+}
+
+/// Permission bit constants (gateway-level, u32).
 pub mod permissions {
     pub const RELAY: u32 = 0x01;
     pub const EMERGENCY: u32 = 0x02;
     pub const ENROLL: u32 = 0x04;
     pub const ADMIN: u32 = 0x08;
+
+    /// Narrow gateway permission bits (u32) to mesh wire permissions (u8).
+    /// Gateway ADMIN (0x08) maps to mesh ADMIN (0x80); other bits are identical.
+    pub fn to_mesh(perms: u32) -> u8 {
+        use peat_mesh::security::certificate::permissions as mp;
+        let mut out: u8 = 0;
+        if perms & RELAY != 0 {
+            out |= mp::RELAY;
+        }
+        if perms & EMERGENCY != 0 {
+            out |= mp::EMERGENCY;
+        }
+        if perms & ENROLL != 0 {
+            out |= mp::ENROLL;
+        }
+        if perms & ADMIN != 0 {
+            out |= mp::ADMIN;
+        }
+        out
+    }
 }
 
 /// Result of enrollment: decision + metadata.

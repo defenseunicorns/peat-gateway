@@ -44,6 +44,7 @@ async fn setup() -> Option<(TenantManager, CdcEngine, tempfile::TempDir)> {
             nats_url: Some(nats_url()),
             kafka_brokers: None,
         },
+        ui_dir: None,
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();

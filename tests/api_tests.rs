@@ -21,6 +21,7 @@ async fn spawn_app() -> (Client, String, tempfile::TempDir) {
             nats_url: None,
             kafka_brokers: None,
         },
+        ui_dir: None,
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();

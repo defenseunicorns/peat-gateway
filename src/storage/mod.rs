@@ -60,6 +60,11 @@ pub trait StorageBackend: Send + Sync {
         limit: usize,
     ) -> Result<Vec<EnrollmentAuditEntry>>;
 
+    // Genesis key material (opaque bytes — contains authority secret)
+    async fn store_genesis(&self, org_id: &str, app_id: &str, encoded: &[u8]) -> Result<()>;
+    async fn get_genesis(&self, org_id: &str, app_id: &str) -> Result<Option<Vec<u8>>>;
+    async fn delete_genesis(&self, org_id: &str, app_id: &str) -> Result<bool>;
+
     // CDC cursors — track last emitted change hash per document for replay on restart
     async fn get_cursor(
         &self,

@@ -28,7 +28,7 @@ tokio = { version = "1", features = ["full"] }
 # Web framework (admin API)
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout", "fs"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -76,3 +76,5 @@ tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
 async-nats = "0.38"
 futures = "0.3"
+peat-mesh = { version = "0.5", features = ["automerge-backend"] }
+hex = "0.4"

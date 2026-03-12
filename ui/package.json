@@ -1,0 +1,36 @@
+{
+  "name": "peat-gateway-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "postinstall": "svelte-kit sync",
+    "lint": "prettier --check . && svelte-kit sync && svelte-check",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "3.0.10",
+    "@sveltejs/kit": "2.50.0",
+    "@sveltejs/vite-plugin-svelte": "6.2.1",
+    "@tailwindcss/vite": "4.1.18",
+    "carbon-icons-svelte": "13.8.0",
+    "carbon-preprocess-svelte": "0.11.22",
+    "flowbite": "4.0.1",
+    "prettier": "~3.6.2",
+    "prettier-plugin-svelte": "3.4.1",
+    "prettier-plugin-tailwindcss": "0.7.2",
+    "svelte": "5.47.1",
+    "svelte-check": "4.3.6",
+    "tailwindcss": "4.1.18",
+    "typescript": "5.9.3",
+    "vite": "7.3.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

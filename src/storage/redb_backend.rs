@@ -19,6 +19,7 @@ const CURSORS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("cdc_cur
 const IDPS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("idp_configs");
 const POLICY_RULES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_rules");
 const AUDIT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("enrollment_audit");
+const GENESIS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("genesis");
 
 pub struct RedbBackend {
     db: Arc<Database>,
@@ -42,6 +43,7 @@ impl RedbBackend {
             let _ = txn.open_table(IDPS_TABLE)?;
             let _ = txn.open_table(POLICY_RULES_TABLE)?;
             let _ = txn.open_table(AUDIT_TABLE)?;
+            let _ = txn.open_table(GENESIS_TABLE)?;
         }
         txn.commit()?;
 
@@ -175,6 +177,7 @@ impl StorageBackend for RedbBackend {
                 IDPS_TABLE,
                 POLICY_RULES_TABLE,
                 AUDIT_TABLE,
+                GENESIS_TABLE,
             ] {
                 let mut table = txn.open_table(table_def)?;
                 let keys_to_remove: Vec<String> = {
@@ -609,6 +612,55 @@ impl StorageBackend for RedbBackend {
                 }
             }
             Ok(entries)
+        })
+        .await?
+    }
+
+    // --- Genesis key material ---
+
+    async fn store_genesis(&self, org_id: &str, app_id: &str, encoded: &[u8]) -> Result<()> {
+        let db = self.db.clone();
+        let key = formation_key(org_id, app_id);
+        let encoded = encoded.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            {
+                let mut table = txn.open_table(GENESIS_TABLE)?;
+                table.insert(key.as_str(), encoded.as_slice())?;
+            }
+            txn.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn get_genesis(&self, org_id: &str, app_id: &str) -> Result<Option<Vec<u8>>> {
+        let db = self.db.clone();
+        let key = formation_key(org_id, app_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_read()?;
+            let table = txn.open_table(GENESIS_TABLE)?;
+            match table.get(key.as_str())? {
+                Some(value) => Ok(Some(value.value().to_vec())),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn delete_genesis(&self, org_id: &str, app_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = formation_key(org_id, app_id);
+        tokio::task::spawn_blocking(move || {
+            let txn = db.begin_write()?;
+            let removed = {
+                let mut table = txn.open_table(GENESIS_TABLE)?;
+                let val = table.remove(key.as_str())?;
+                val.is_some()
+            };
+            txn.commit()?;
+            Ok(removed)
         })
         .await?
     }
