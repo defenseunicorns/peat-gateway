@@ -84,4 +84,5 @@ reqwest = { version = "0.12", features = ["json"] }
 async-nats = "0.38"
 futures = "0.3"
 peat-mesh = { version = "0.5", features = ["automerge-backend"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 hex = "0.4"
