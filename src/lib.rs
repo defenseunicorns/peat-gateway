@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod cdc;
+pub mod cli;
 pub mod config;
 pub mod crypto;
 pub mod storage;

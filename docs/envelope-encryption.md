@@ -81,7 +81,13 @@ Existing plaintext genesis records need a one-time migration. The approach:
 
 1. When `PEAT_KEK` is not set, the gateway operates in plaintext mode (current behavior). No encryption, no decryption. This preserves backward compatibility for dev/test.
 2. When `PEAT_KEK` is set, all writes are encrypted. Reads attempt decryption first; if decryption fails (no envelope header), fall back to reading as plaintext and re-encrypt on next write.
-3. A `peat-gateway migrate-keys` subcommand encrypts all plaintext genesis records in-place. Run once after setting `PEAT_KEK` in production.
+3. `peat-gateway migrate-keys` encrypts all plaintext genesis records in-place. Run once after setting `PEAT_KEK` in production.
+
+```bash
+PEAT_KEK=<64-hex-chars> peat-gateway migrate-keys
+```
+
+The subcommand iterates every org → formation → genesis record, skips records that already have the `PENV` envelope header, and seals plaintext records with the configured KEK. Each record is verified via roundtrip (seal → open → compare) before the encrypted bytes are written back, so a failure mid-migration leaves already-migrated records encrypted and un-migrated records as plaintext — the gateway handles both transparently.
 
 This avoids a hard cutover and lets operators migrate at their own pace.
 
