@@ -6,7 +6,7 @@
 //! to where the KEK lives.
 
 #[cfg(feature = "aws-kms")]
-mod kms;
+pub mod kms;
 mod local;
 #[cfg(feature = "vault")]
 mod vault;
