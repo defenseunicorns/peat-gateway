@@ -28,18 +28,31 @@ mod inner {
         (StatusCode::FORBIDDEN, msg.into())
     }
 
+    fn too_many_requests(msg: impl Into<String>) -> ApiError {
+        (StatusCode::TOO_MANY_REQUESTS, msg.into())
+    }
+
+    fn internal(e: anyhow::Error) -> ApiError {
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+
     #[derive(Serialize)]
     struct EnrollmentResponse {
         decision: EnrollmentDecision,
         audit_id: String,
-        /// Placeholder — actual MeshCertificate issuance requires formation key material
         certificate: Option<String>,
+        mesh_id: Option<String>,
+        authority_public_key: Option<String>,
     }
 
     #[derive(Deserialize)]
     struct EnrollRequest {
         /// Optional: override bearer token from body instead of Authorization header
         token: Option<String>,
+        /// Hex-encoded 32-byte Ed25519 public key for certificate issuance
+        public_key: Option<String>,
+        /// Discovery hostname / node identifier
+        node_id: Option<String>,
     }
 
     async fn enroll(
@@ -49,84 +62,94 @@ mod inner {
         body: Option<Json<EnrollRequest>>,
     ) -> Result<Json<EnrollmentResponse>, ApiError> {
         // Verify org and formation exist
-        let _org = mgr.get_org(&org_id).await.map_err(bad_request)?;
+        let org = mgr.get_org(&org_id).await.map_err(bad_request)?;
         let formation = mgr
             .get_formation(&org_id, &app_id)
             .await
             .map_err(bad_request)?;
 
-        // Check enrollment policy
-        match formation.enrollment_policy {
-            EnrollmentPolicy::Strict => {
-                return Err(forbidden(
-                    "Formation requires explicit admin approval (Strict policy)",
-                ));
+        // Validate public_key if provided (fail fast before expensive operations)
+        if let Some(ref b) = body {
+            if let Some(ref pk) = b.public_key {
+                validate_public_key(pk)?;
             }
+        }
+
+        // Rate limit check
+        let one_hour_ago = now_ms().saturating_sub(3_600_000);
+        let recent = mgr
+            .count_recent_enrollments(&org_id, one_hour_ago)
+            .await
+            .map_err(internal)?;
+        if recent as u32 >= org.quotas.max_enrollments_per_hour {
+            return Err(too_many_requests("Enrollment rate limit exceeded"));
+        }
+
+        // Check enrollment policy
+        if matches!(formation.enrollment_policy, EnrollmentPolicy::Strict) {
+            return Err(forbidden(
+                "Formation requires explicit admin approval (Strict policy)",
+            ));
+        }
+
+        // Determine enrollment decision based on policy
+        let (decision, idp_id, subject) = match formation.enrollment_policy {
             EnrollmentPolicy::Open => {
-                // Open formations don't require IdP — return approved with Endpoint tier
-                let audit_id = generate_id();
                 let decision = EnrollmentDecision::Approved {
                     tier: MeshTier::Endpoint,
                     permissions: 0,
                 };
-                let entry =
-                    build_audit(&audit_id, &org_id, &app_id, "none", "anonymous", &decision);
-                let _ = mgr.append_audit(&entry).await;
-                info!(org_id = %org_id, app_id = %app_id, "Open enrollment approved");
-                return Ok(Json(EnrollmentResponse {
-                    decision,
-                    audit_id,
-                    certificate: None,
-                }));
+                (decision, "none".to_string(), "anonymous".to_string())
             }
             EnrollmentPolicy::Controlled => {
-                // Requires IdP token — continue below
-            }
-        }
+                // Extract bearer token
+                let bearer = extract_bearer(&headers, body.as_ref()).ok_or_else(|| {
+                    unauthorized("Missing bearer token (Authorization: Bearer <token>)")
+                })?;
 
-        // Extract bearer token
-        let bearer = extract_bearer(&headers, body.as_ref())
-            .ok_or_else(|| unauthorized("Missing bearer token (Authorization: Bearer <token>)"))?;
+                // Find an enabled IdP for this org
+                let idps = mgr.list_idps(&org_id).await.map_err(bad_request)?;
+                let idp = idps.iter().find(|i| i.enabled).ok_or_else(|| {
+                    bad_request(anyhow::anyhow!(
+                        "No enabled identity provider configured for org '{}'",
+                        org_id
+                    ))
+                })?;
 
-        // Find an enabled IdP for this org
-        let idps = mgr.list_idps(&org_id).await.map_err(bad_request)?;
-        let idp = idps.iter().find(|i| i.enabled).ok_or_else(|| {
-            bad_request(anyhow::anyhow!(
-                "No enabled identity provider configured for org '{}'",
-                org_id
-            ))
-        })?;
-
-        // Introspect the token against the IdP
-        let claims =
-            introspect_oidc_token(&idp.issuer_url, &idp.client_id, &idp.client_secret, &bearer)
+                // Introspect the token against the IdP
+                let claims = introspect_oidc_token(
+                    &idp.issuer_url,
+                    &idp.client_id,
+                    &idp.client_secret,
+                    &bearer,
+                )
                 .await
                 .map_err(|e| unauthorized(format!("Token validation failed: {e}")))?;
 
-        let subject = claims
-            .get("sub")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+                let subject = claims
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
 
-        // Evaluate policy rules
-        let rules = mgr.list_policy_rules(&org_id).await.map_err(bad_request)?;
-        let decision = evaluate_policy(&rules, &claims);
+                // Evaluate policy rules
+                let rules = mgr.list_policy_rules(&org_id).await.map_err(bad_request)?;
+                let decision = evaluate_policy(&rules, &claims);
 
+                (decision, idp.idp_id.clone(), subject)
+            }
+            EnrollmentPolicy::Strict => unreachable!(),
+        };
+
+        // Record audit
         let audit_id = generate_id();
-        let entry = build_audit(
-            &audit_id,
-            &org_id,
-            &app_id,
-            &idp.idp_id,
-            &subject,
-            &decision,
-        );
+        let entry = build_audit(&audit_id, &org_id, &app_id, &idp_id, &subject, &decision);
 
         if let Err(e) = mgr.append_audit(&entry).await {
             warn!(error = %e, "Failed to persist enrollment audit entry");
         }
 
+        // Check for denial
         match &decision {
             EnrollmentDecision::Approved { tier, permissions } => {
                 info!(
@@ -135,7 +158,7 @@ mod inner {
                     subject = %subject,
                     tier = ?tier,
                     permissions = permissions,
-                    "Enrollment approved via OIDC"
+                    "Enrollment approved"
                 );
             }
             EnrollmentDecision::Denied { reason } => {
@@ -150,11 +173,92 @@ mod inner {
             }
         }
 
+        // Try certificate issuance
+        let (certificate, mesh_id, authority_public_key) =
+            try_issue_certificate(&mgr, &org_id, &app_id, &decision, body.as_ref()).await;
+
         Ok(Json(EnrollmentResponse {
             decision,
             audit_id,
-            certificate: None, // Placeholder until formation key material is wired
+            certificate,
+            mesh_id,
+            authority_public_key,
         }))
+    }
+
+    /// Attempt to issue a MeshCertificate for an approved enrollment.
+    /// Returns (certificate_hex, mesh_id, authority_pubkey_hex) or (None, None, None)
+    /// on graceful degradation (no key material in request, or pre-existing formation
+    /// without genesis).
+    async fn try_issue_certificate(
+        mgr: &TenantManager,
+        org_id: &str,
+        app_id: &str,
+        decision: &EnrollmentDecision,
+        body: Option<&Json<EnrollRequest>>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let (tier, perms) = match decision {
+            EnrollmentDecision::Approved { tier, permissions } => (tier, permissions),
+            EnrollmentDecision::Denied { .. } => return (None, None, None),
+        };
+
+        // Extract public_key and node_id from request body
+        let (public_key_hex, node_id) = match body {
+            Some(b) => match (&b.public_key, &b.node_id) {
+                (Some(pk), Some(nid)) => (pk.clone(), nid.clone()),
+                _ => return (None, None, None),
+            },
+            None => return (None, None, None),
+        };
+
+        // Parse and validate public key (must be exactly 32 bytes)
+        let pk_bytes = match hex::decode(&public_key_hex) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => return (None, None, None),
+        };
+
+        // Load genesis for formation (graceful if missing)
+        let genesis = match mgr.load_genesis(org_id, app_id).await {
+            Ok(g) => g,
+            Err(_) => return (None, None, None),
+        };
+
+        // Map gateway tier/perms to mesh wire format
+        let mesh_tier = tier.to_mesh_tier();
+        let mesh_perms = crate::tenant::models::permissions::to_mesh(*perms);
+
+        // Issue certificate (24h validity)
+        let cert = genesis.issue_certificate(
+            pk_bytes,
+            &node_id,
+            mesh_tier,
+            mesh_perms,
+            24 * 60 * 60 * 1000,
+        );
+
+        let cert_hex = hex::encode(cert.encode());
+        let mesh_id = genesis.mesh_id();
+        let authority_pk_hex = hex::encode(genesis.authority_public_key());
+
+        (Some(cert_hex), Some(mesh_id), Some(authority_pk_hex))
+    }
+
+    /// Validate a hex-encoded public key is exactly 32 bytes.
+    /// Used by the handler to return a proper 400 before falling through to try_issue_certificate.
+    fn validate_public_key(pk_hex: &str) -> Result<(), ApiError> {
+        let bytes = hex::decode(pk_hex)
+            .map_err(|_| bad_request(anyhow::anyhow!("Invalid public_key: not valid hex")))?;
+        if bytes.len() != 32 {
+            return Err(bad_request(anyhow::anyhow!(
+                "Invalid public_key: expected 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(())
     }
 
     fn extract_bearer(headers: &HeaderMap, body: Option<&Json<EnrollRequest>>) -> Option<String> {
@@ -256,6 +360,13 @@ mod inner {
         }
     }
 
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
     fn generate_id() -> String {
         let mut buf = [0u8; 8];
         use rand_core::RngCore;
@@ -271,11 +382,6 @@ mod inner {
         subject: &str,
         decision: &EnrollmentDecision,
     ) -> EnrollmentAuditEntry {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
         EnrollmentAuditEntry {
             audit_id: audit_id.to_string(),
             org_id: org_id.to_string(),
@@ -283,7 +389,7 @@ mod inner {
             idp_id: idp_id.to_string(),
             subject: subject.to_string(),
             decision: decision.clone(),
-            timestamp_ms: now,
+            timestamp_ms: now_ms(),
         }
     }
 

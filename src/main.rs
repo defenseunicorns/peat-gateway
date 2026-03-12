@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let cdc_engine = cdc::CdcEngine::new(&config, tenant_mgr.clone()).await?;
 
     // Start API server
-    let app = api::router(tenant_mgr, cdc_engine);
+    let app = api::router(tenant_mgr, cdc_engine, config.ui_dir.as_deref());
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     info!("Listening on {}", config.bind_addr);
