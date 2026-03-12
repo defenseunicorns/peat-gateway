@@ -60,9 +60,10 @@ async fn drop_test_db(db_name: &str) {
     let url = admin_url();
     if let Ok(pool) = PgPool::connect(&url).await {
         // Terminate active connections first
-        let _ = sqlx::query(&format!(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
-        ))
+        let _ = sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1",
+        )
+        .bind(db_name)
         .execute(&pool)
         .await;
         let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
@@ -229,6 +230,49 @@ async fn pg_delete_org_cascades() {
         })
         .await
         .unwrap();
+    store
+        .create_idp(&IdpConfig {
+            idp_id: "idp-1".into(),
+            org_id: "cascade".into(),
+            issuer_url: "https://example.com".into(),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            enabled: true,
+            created_at: 1700000000000,
+        })
+        .await
+        .unwrap();
+    store
+        .create_policy_rule(&PolicyRule {
+            rule_id: "rule-1".into(),
+            org_id: "cascade".into(),
+            claim_key: "role".into(),
+            claim_value: "admin".into(),
+            tier: MeshTier::Authority,
+            permissions: 0x0F,
+            priority: 10,
+        })
+        .await
+        .unwrap();
+    store
+        .append_audit(&EnrollmentAuditEntry {
+            audit_id: "audit-1".into(),
+            org_id: "cascade".into(),
+            app_id: "app-1".into(),
+            idp_id: "idp-1".into(),
+            subject: "user@example.com".into(),
+            decision: EnrollmentDecision::Approved {
+                tier: MeshTier::Endpoint,
+                permissions: 0x01,
+            },
+            timestamp_ms: 1700000000000,
+        })
+        .await
+        .unwrap();
+    store
+        .set_cursor("cascade", "app-1", "doc-1", "hash-abc")
+        .await
+        .unwrap();
 
     // Delete org — everything should cascade
     assert!(store.delete_org("cascade").await.unwrap());
@@ -240,6 +284,18 @@ async fn pg_delete_org_cascades() {
         .is_none());
     assert!(store.get_token("cascade", "tok-1").await.unwrap().is_none());
     assert!(store.list_sinks("cascade").await.unwrap().is_empty());
+    assert!(store.list_idps("cascade").await.unwrap().is_empty());
+    assert!(store.list_policy_rules("cascade").await.unwrap().is_empty());
+    assert!(store
+        .list_audit("cascade", None, 100)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .get_cursor("cascade", "app-1", "doc-1")
+        .await
+        .unwrap()
+        .is_none());
 
     drop_test_db(&db).await;
 }
@@ -444,13 +500,41 @@ async fn pg_audit_log() {
             .unwrap();
     }
 
+    // Add a Denied entry to verify enum variant roundtrips
+    store
+        .append_audit(&EnrollmentAuditEntry {
+            audit_id: "audit-denied".into(),
+            org_id: "acme".into(),
+            app_id: "mesh-1".into(),
+            idp_id: "idp-1".into(),
+            subject: "blocked@example.com".into(),
+            decision: EnrollmentDecision::Denied {
+                reason: "insufficient claims".into(),
+            },
+            timestamp_ms: 1700000000001,
+        })
+        .await
+        .unwrap();
+
     // List all
     let all = store.list_audit("acme", None, 100).await.unwrap();
-    assert_eq!(all.len(), 3);
+    assert_eq!(all.len(), 4);
 
     // Filter by app_id
     let filtered = store.list_audit("acme", Some("mesh-1"), 100).await.unwrap();
-    assert_eq!(filtered.len(), 2);
+    assert_eq!(filtered.len(), 3);
+
+    // Verify Denied variant roundtripped correctly
+    let denied = filtered
+        .iter()
+        .find(|e| e.audit_id == "audit-denied")
+        .expect("denied entry should exist");
+    match &denied.decision {
+        EnrollmentDecision::Denied { reason } => {
+            assert_eq!(reason, "insufficient claims");
+        }
+        other => panic!("expected Denied, got {other:?}"),
+    }
 
     // Limit
     let limited = store.list_audit("acme", None, 2).await.unwrap();
