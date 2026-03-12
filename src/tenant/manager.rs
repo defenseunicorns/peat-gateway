@@ -147,7 +147,7 @@ impl TenantManager {
 
         // Envelope-encrypt genesis if KEK is configured
         let stored_bytes = if self.encrypt_enabled {
-            crypto::seal(self.key_provider.as_ref(), &encoded)?
+            crypto::seal(self.key_provider.as_ref(), &encoded).await?
         } else {
             encoded
         };
@@ -203,7 +203,7 @@ impl TenantManager {
 
         // Try envelope decryption first; fall back to plaintext for legacy data
         let plaintext = if self.encrypt_enabled {
-            match crypto::open(self.key_provider.as_ref(), &stored)? {
+            match crypto::open(self.key_provider.as_ref(), &stored).await? {
                 Some(decrypted) => decrypted,
                 None => {
                     // Legacy plaintext — re-encrypt on next store

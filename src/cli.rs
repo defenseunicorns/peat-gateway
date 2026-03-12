@@ -63,10 +63,10 @@ pub async fn migrate_keys(config: &GatewayConfig, dry_run: bool) -> Result<()> {
             }
 
             // Plaintext — encrypt and store back
-            let sealed = crypto::seal(&provider, &raw)?;
+            let sealed = crypto::seal(&provider, &raw).await?;
 
             // Verify roundtrip before overwriting
-            let decrypted = crypto::open(&provider, &sealed)?.ok_or_else(|| {
+            let decrypted = crypto::open(&provider, &sealed).await?.ok_or_else(|| {
                 anyhow::anyhow!("Roundtrip verification failed: seal produced non-envelope output")
             })?;
             if decrypted != raw {

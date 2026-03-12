@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use rand_core::RngCore;
 use zeroize::Zeroize;
 
+use async_trait::async_trait;
+
 use super::KeyProvider;
 
 /// AES-256-GCM based key provider with a locally-held KEK.
@@ -50,8 +52,9 @@ impl Drop for LocalKeyProvider {
     }
 }
 
+#[async_trait]
 impl KeyProvider for LocalKeyProvider {
-    fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>> {
+    async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>> {
         let mut nonce_bytes = [0u8; 12];
         rand_core::OsRng.fill_bytes(&mut nonce_bytes);
 
@@ -66,7 +69,7 @@ impl KeyProvider for LocalKeyProvider {
         Ok(out) // 12 + 32 + 16 = 60 bytes for a 32-byte DEK
     }
 
-    fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>> {
+    async fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>> {
         if wrapped.len() < 12 + 16 {
             anyhow::bail!("Wrapped DEK too short: {}", wrapped.len());
         }
@@ -82,25 +85,25 @@ impl KeyProvider for LocalKeyProvider {
 mod tests {
     use super::*;
 
-    #[test]
-    fn wrap_unwrap_roundtrip() {
+    #[tokio::test]
+    async fn wrap_unwrap_roundtrip() {
         let provider = LocalKeyProvider::new([0x42u8; 32]);
         let dek = [0x99u8; 32];
 
-        let wrapped = provider.wrap_dek(&dek).unwrap();
+        let wrapped = provider.wrap_dek(&dek).await.unwrap();
         assert_eq!(wrapped.len(), 60); // 12 + 32 + 16
 
-        let recovered = provider.unwrap_dek(&wrapped).unwrap();
+        let recovered = provider.unwrap_dek(&wrapped).await.unwrap();
         assert_eq!(recovered, dek);
     }
 
-    #[test]
-    fn wrong_kek_fails() {
+    #[tokio::test]
+    async fn wrong_kek_fails() {
         let p1 = LocalKeyProvider::new([0x11u8; 32]);
         let p2 = LocalKeyProvider::new([0x22u8; 32]);
 
-        let wrapped = p1.wrap_dek(&[0x33u8; 32]).unwrap();
-        assert!(p2.unwrap_dek(&wrapped).is_err());
+        let wrapped = p1.wrap_dek(&[0x33u8; 32]).await.unwrap();
+        assert!(p2.unwrap_dek(&wrapped).await.is_err());
     }
 
     #[test]

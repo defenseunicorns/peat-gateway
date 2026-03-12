@@ -8,6 +8,7 @@
 mod local;
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use rand_core::RngCore;
 
 pub use local::LocalKeyProvider;
@@ -21,20 +22,22 @@ pub use local::LocalKeyProvider;
 /// their own nonces, IV, and metadata internally.
 ///
 /// The only contract is that `unwrap_dek(wrap_dek(dek))` returns the original DEK.
+#[async_trait]
 pub trait KeyProvider: Send + Sync {
-    fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>>;
-    fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>>;
+    async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>>;
+    async fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// A no-op provider that stores genesis bytes in plaintext.
 /// Used when `PEAT_KEK` is not configured (dev/test mode).
 pub struct PlaintextProvider;
 
+#[async_trait]
 impl KeyProvider for PlaintextProvider {
-    fn wrap_dek(&self, _dek: &[u8]) -> Result<Vec<u8>> {
+    async fn wrap_dek(&self, _dek: &[u8]) -> Result<Vec<u8>> {
         unreachable!("PlaintextProvider does not use DEKs")
     }
-    fn unwrap_dek(&self, _wrapped: &[u8]) -> Result<Vec<u8>> {
+    async fn unwrap_dek(&self, _wrapped: &[u8]) -> Result<Vec<u8>> {
         unreachable!("PlaintextProvider does not use DEKs")
     }
 }
@@ -54,7 +57,7 @@ const VERSION: u8 = 0x01;
 const FIXED_HEADER: usize = 4 + 1 + 2; // magic + version + wrapped_dek_len
 
 /// Encrypt `plaintext` using a fresh DEK, wrapping the DEK with `provider`.
-pub fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8>> {
+pub async fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8>> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
@@ -67,7 +70,7 @@ pub fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8>> {
     rand_core::OsRng.fill_bytes(&mut data_nonce);
 
     // Wrap DEK with provider (opaque blob — provider manages its own nonces)
-    let wrapped_dek = provider.wrap_dek(&dek)?;
+    let wrapped_dek = provider.wrap_dek(&dek).await?;
     let wrapped_len = u16::try_from(wrapped_dek.len())
         .context("Wrapped DEK exceeds 65535 bytes — provider returned unreasonable output")?;
 
@@ -101,7 +104,7 @@ pub fn is_envelope(data: &[u8]) -> bool {
 ///
 /// If `data` does not start with the envelope magic bytes, returns `None`
 /// (indicating plaintext/legacy data that the caller should handle directly).
-pub fn open(provider: &dyn KeyProvider, data: &[u8]) -> Result<Option<Vec<u8>>> {
+pub async fn open(provider: &dyn KeyProvider, data: &[u8]) -> Result<Option<Vec<u8>>> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
@@ -127,7 +130,7 @@ pub fn open(provider: &dyn KeyProvider, data: &[u8]) -> Result<Option<Vec<u8>>> 
     let ciphertext = &data[nonce_end..];
 
     // Unwrap DEK via provider
-    let mut dek = provider.unwrap_dek(wrapped_dek)?;
+    let mut dek = provider.unwrap_dek(wrapped_dek).await?;
     if dek.len() != 32 {
         bail!(
             "KeyProvider.unwrap_dek must return 32 bytes, got {}",
@@ -150,62 +153,64 @@ pub fn open(provider: &dyn KeyProvider, data: &[u8]) -> Result<Option<Vec<u8>>> 
 mod tests {
     use super::*;
 
-    #[test]
-    fn roundtrip_seal_open() {
+    #[tokio::test]
+    async fn roundtrip_seal_open() {
         let provider = LocalKeyProvider::new([0xABu8; 32]);
         let plaintext = b"mesh genesis secret key material here";
 
-        let envelope = seal(&provider, plaintext).unwrap();
+        let envelope = seal(&provider, plaintext).await.unwrap();
         assert_eq!(&envelope[..4], MAGIC);
         assert_eq!(envelope[4], VERSION);
 
-        let recovered = open(&provider, &envelope).unwrap().unwrap();
+        let recovered = open(&provider, &envelope).await.unwrap().unwrap();
         assert_eq!(recovered, plaintext);
     }
 
-    #[test]
-    fn open_returns_none_for_plaintext() {
+    #[tokio::test]
+    async fn open_returns_none_for_plaintext() {
         let provider = LocalKeyProvider::new([0xABu8; 32]);
-        let result = open(&provider, b"not an envelope, just raw genesis bytes").unwrap();
+        let result = open(&provider, b"not an envelope, just raw genesis bytes")
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
-    #[test]
-    fn wrong_kek_fails_decryption() {
+    #[tokio::test]
+    async fn wrong_kek_fails_decryption() {
         let p1 = LocalKeyProvider::new([0xAAu8; 32]);
         let p2 = LocalKeyProvider::new([0xBBu8; 32]);
 
-        let envelope = seal(&p1, b"secret").unwrap();
-        assert!(open(&p2, &envelope).is_err());
+        let envelope = seal(&p1, b"secret").await.unwrap();
+        assert!(open(&p2, &envelope).await.is_err());
     }
 
-    #[test]
-    fn tampered_ciphertext_fails() {
+    #[tokio::test]
+    async fn tampered_ciphertext_fails() {
         let provider = LocalKeyProvider::new([0xCCu8; 32]);
-        let mut envelope = seal(&provider, b"secret").unwrap();
+        let mut envelope = seal(&provider, b"secret").await.unwrap();
         let last = envelope.len() - 1;
         envelope[last] ^= 0xFF;
-        assert!(open(&provider, &envelope).is_err());
+        assert!(open(&provider, &envelope).await.is_err());
     }
 
-    #[test]
-    fn different_seals_produce_different_envelopes() {
+    #[tokio::test]
+    async fn different_seals_produce_different_envelopes() {
         let provider = LocalKeyProvider::new([0xDDu8; 32]);
         let plaintext = b"same input";
 
-        let e1 = seal(&provider, plaintext).unwrap();
-        let e2 = seal(&provider, plaintext).unwrap();
+        let e1 = seal(&provider, plaintext).await.unwrap();
+        let e2 = seal(&provider, plaintext).await.unwrap();
         assert_ne!(e1, e2);
 
-        assert_eq!(open(&provider, &e1).unwrap().unwrap(), plaintext);
-        assert_eq!(open(&provider, &e2).unwrap().unwrap(), plaintext);
+        assert_eq!(open(&provider, &e1).await.unwrap().unwrap(), plaintext);
+        assert_eq!(open(&provider, &e2).await.unwrap().unwrap(), plaintext);
     }
 
-    #[test]
-    fn empty_plaintext_roundtrip() {
+    #[tokio::test]
+    async fn empty_plaintext_roundtrip() {
         let provider = LocalKeyProvider::new([0xEEu8; 32]);
-        let envelope = seal(&provider, b"").unwrap();
-        let recovered = open(&provider, &envelope).unwrap().unwrap();
+        let envelope = seal(&provider, b"").await.unwrap();
+        let recovered = open(&provider, &envelope).await.unwrap().unwrap();
         assert!(recovered.is_empty());
     }
 }
