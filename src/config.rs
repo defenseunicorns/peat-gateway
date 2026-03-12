@@ -12,6 +12,9 @@ pub struct GatewayConfig {
     pub cdc: CdcConfig,
     /// Optional directory to serve the admin UI from
     pub ui_dir: Option<String>,
+    /// Hex-encoded 256-bit key-encryption key for genesis envelope encryption.
+    /// When absent, genesis data is stored in plaintext (dev/test mode).
+    pub kek: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +58,7 @@ impl GatewayConfig {
                 kafka_brokers: env::var("PEAT_CDC_KAFKA_BROKERS").ok(),
             },
             ui_dir: env::var("PEAT_UI_DIR").ok(),
+            kek: env::var("PEAT_KEK").ok(),
         })
     }
 }

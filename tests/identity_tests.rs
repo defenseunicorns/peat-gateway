@@ -24,6 +24,7 @@ async fn setup() -> (TenantManager, axum::Router, tempfile::TempDir) {
             kafka_brokers: None,
         },
         ui_dir: None,
+        kek: None,
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
@@ -711,4 +712,119 @@ async fn enroll_certificate_has_correct_tier_and_permissions() {
     // 0 gateway perms → 0 mesh perms
     assert_eq!(cert.permissions, 0);
     assert!(cert.verify().is_ok());
+}
+
+// ── Envelope encryption: full round-trip with KEK enabled ───
+
+async fn setup_encrypted() -> (TenantManager, axum::Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.redb");
+    let config = GatewayConfig {
+        bind_addr: "127.0.0.1:0".into(),
+        storage: StorageConfig::Redb {
+            path: db_path.to_str().unwrap().into(),
+        },
+        cdc: CdcConfig {
+            nats_url: None,
+            kafka_brokers: None,
+        },
+        ui_dir: None,
+        kek: Some("aa".repeat(32)),
+    };
+    let tenant_mgr = TenantManager::new(&config).await.unwrap();
+    let app = peat_gateway::api::app(tenant_mgr.clone());
+    (tenant_mgr, app, dir)
+}
+
+#[tokio::test]
+async fn encrypted_genesis_issues_valid_certificate() {
+    let (mgr, app, _dir) = setup_encrypted().await;
+    mgr.create_org("enc-org".into(), "Encrypted Org".into())
+        .await
+        .unwrap();
+    let formation = mgr
+        .create_formation("enc-org", "enc-mesh".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+
+    let device = peat_mesh::security::DeviceKeypair::generate();
+    let pk_hex = hex::encode(device.public_key_bytes());
+
+    let resp = app
+        .oneshot(json_request(
+            "POST",
+            "/orgs/enc-org/formations/enc-mesh/enroll",
+            Some(json!({
+                "public_key": pk_hex,
+                "node_id": "encrypted-node-1"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    let cert_hex = body["certificate"]
+        .as_str()
+        .expect("certificate should be present");
+    let cert_bytes = hex::decode(cert_hex).unwrap();
+    let cert = peat_mesh::security::MeshCertificate::decode(&cert_bytes).unwrap();
+
+    assert!(cert.verify().is_ok());
+    assert_eq!(cert.mesh_id, formation.mesh_id);
+    assert_eq!(cert.node_id, "encrypted-node-1");
+}
+
+#[tokio::test]
+async fn encrypted_genesis_stored_bytes_are_not_plaintext() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.redb");
+    let config = GatewayConfig {
+        bind_addr: "127.0.0.1:0".into(),
+        storage: StorageConfig::Redb {
+            path: db_path.to_str().unwrap().into(),
+        },
+        cdc: CdcConfig {
+            nats_url: None,
+            kafka_brokers: None,
+        },
+        ui_dir: None,
+        kek: Some("bb".repeat(32)),
+    };
+    // Create org + formation (encrypts genesis), then drop to release redb lock
+    {
+        let mgr = TenantManager::new(&config).await.unwrap();
+        mgr.create_org("raw-org".into(), "Raw Org".into())
+            .await
+            .unwrap();
+        mgr.create_formation("raw-org", "raw-app".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+    }
+
+    // Read raw bytes from storage — they should start with "PENV" (envelope magic)
+    let raw = {
+        let store = peat_gateway::storage::open(&config.storage).await.unwrap();
+        store
+            .get_genesis("raw-org", "raw-app")
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        &raw[..4],
+        b"PENV",
+        "stored genesis should be envelope-encrypted"
+    );
+
+    // Should NOT be decodeable as plaintext MeshGenesis
+    assert!(
+        peat_mesh::security::MeshGenesis::decode(&raw).is_err(),
+        "encrypted bytes should not decode as plaintext genesis"
+    );
+
+    // Reopen TenantManager — loading through it should decrypt transparently
+    let mgr = TenantManager::new(&config).await.unwrap();
+    let genesis = mgr.load_genesis("raw-org", "raw-app").await.unwrap();
+    assert!(!genesis.mesh_id().is_empty());
 }

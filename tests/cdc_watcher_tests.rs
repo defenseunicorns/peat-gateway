@@ -93,6 +93,7 @@ async fn setup() -> (TenantManager, CdcEngine, tempfile::TempDir) {
             kafka_brokers: None,
         },
         ui_dir: None,
+        kek: None,
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let engine = CdcEngine::new(&config, tenant_mgr.clone()).await.unwrap();

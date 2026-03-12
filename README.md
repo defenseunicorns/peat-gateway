@@ -11,8 +11,10 @@ The core problem: as PEAT deployments grow from a single squad mesh to dozens of
 ### What peat-gateway provides
 
 - **Multi-org tenancy** — Multiple organizations, each with independent formations (app IDs), isolated cryptographic material, and separate data paths. No cross-org trust.
+- **Envelope encryption** — MeshGenesis authority keys are encrypted at rest using AES-256-GCM envelope encryption. Per-record DEKs are wrapped by a KEK via a pluggable `KeyProvider` trait (local AES, with KMS/Vault planned). See [docs/envelope-encryption.md](docs/envelope-encryption.md).
 - **Change Data Capture (CDC)** — CRDT document mutations stream to Kafka, NATS JetStream, Redis Streams, or webhooks for downstream analytics, audit, and integration.
 - **Identity federation** — Enrollment delegates to enterprise IDAM/ICAM (Keycloak, Okta, Azure AD, CAC/SAML) instead of static bootstrap tokens.
+- **Admin UI** — SvelteKit dashboard served at `/_/` for org, formation, sink, token, and audit management.
 - **Admin API** — RESTful org/formation/peer/certificate management with Prometheus metrics.
 - **Zarf/UDS packaging** — First-class UDS capability with Helm chart, SSO, network policies, and air-gapped bundle support.
 
@@ -113,6 +115,8 @@ peat-gateway
 |----------|---------|-------------|
 | `PEAT_GATEWAY_BIND` | `0.0.0.0:8080` | API server bind address |
 | `PEAT_GATEWAY_DATA_DIR` | `./data` | Persistent state directory |
+| `PEAT_KEK` | — | Hex-encoded 256-bit key encryption key. Enables envelope encryption for genesis key material. When unset, genesis is stored as plaintext (dev/test only). |
+| `PEAT_UI_DIR` | — | Path to SvelteKit static build directory. Serves the admin UI at `/_/`. |
 | `PEAT_CDC_NATS_URL` | — | NATS server URL for CDC sink |
 | `PEAT_CDC_KAFKA_BROKERS` | — | Kafka broker list for CDC sink |
 
@@ -167,7 +171,8 @@ peat-gateway is part of the PEAT protocol ecosystem:
 
 ## Design
 
-See [ADR-055](https://github.com/defenseunicorns/peat/blob/main/docs/adr/055-peat-gateway-enterprise-control-plane.md) in the peat repo for the full architectural decision record.
+- [ADR-055: peat-gateway Enterprise Control Plane](https://github.com/defenseunicorns/peat/blob/main/docs/adr/055-peat-gateway-enterprise-control-plane.md) — overall architecture
+- [Envelope Encryption](docs/envelope-encryption.md) — key material encryption design, crate selection, `KeyProvider` trait, and migration strategy
 
 ## License
 
