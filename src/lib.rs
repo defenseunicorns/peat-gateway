@@ -3,5 +3,6 @@
 pub mod api;
 pub mod cdc;
 pub mod config;
+pub mod crypto;
 pub mod storage;
 pub mod tenant;

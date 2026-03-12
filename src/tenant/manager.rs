@@ -9,11 +9,14 @@ use super::models::{
     OrgQuotas, Organization, PolicyRule,
 };
 use crate::config::GatewayConfig;
+use crate::crypto::{self, KeyProvider, LocalKeyProvider, PlaintextProvider};
 use crate::storage::{self, StorageBackend};
 
 #[derive(Clone)]
 pub struct TenantManager {
     store: Arc<dyn StorageBackend>,
+    key_provider: Arc<dyn KeyProvider>,
+    encrypt_enabled: bool,
 }
 
 impl TenantManager {
@@ -21,10 +24,24 @@ impl TenantManager {
         let store = storage::open(&config.storage).await?;
         let store: Arc<dyn StorageBackend> = Arc::from(store);
 
+        let (key_provider, encrypt_enabled): (Arc<dyn KeyProvider>, bool) =
+            if let Some(ref kek_hex) = config.kek {
+                let provider = LocalKeyProvider::from_hex(kek_hex)?;
+                info!("Genesis envelope encryption enabled");
+                (Arc::new(provider), true)
+            } else {
+                info!("Genesis envelope encryption disabled (PEAT_KEK not set)");
+                (Arc::new(PlaintextProvider), false)
+            };
+
         let org_count = store.list_orgs().await?.len();
         info!(orgs = org_count, "Tenant manager initialized");
 
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            key_provider,
+            encrypt_enabled,
+        })
     }
 
     // --- Organizations ---
@@ -128,6 +145,13 @@ impl TenantManager {
         let mesh_id = genesis.mesh_id();
         let encoded = genesis.encode();
 
+        // Envelope-encrypt genesis if KEK is configured
+        let stored_bytes = if self.encrypt_enabled {
+            crypto::seal(self.key_provider.as_ref(), &encoded)?
+        } else {
+            encoded
+        };
+
         let formation = FormationConfig {
             app_id: app_id.clone(),
             mesh_id: mesh_id.clone(),
@@ -135,7 +159,9 @@ impl TenantManager {
         };
 
         self.store.create_formation(org_id, &formation).await?;
-        self.store.store_genesis(org_id, &app_id, &encoded).await?;
+        self.store
+            .store_genesis(org_id, &app_id, &stored_bytes)
+            .await?;
         info!(org_id = %org_id, app_id = %app_id, mesh_id = %mesh_id, "Created formation");
         Ok(formation)
     }
@@ -163,7 +189,7 @@ impl TenantManager {
     }
 
     pub async fn load_genesis(&self, org_id: &str, app_id: &str) -> Result<MeshGenesis> {
-        let bytes = self
+        let stored = self
             .store
             .get_genesis(org_id, app_id)
             .await?
@@ -174,7 +200,26 @@ impl TenantManager {
                     org_id
                 )
             })?;
-        MeshGenesis::decode(&bytes).map_err(|e| anyhow::anyhow!("Failed to decode genesis: {e}"))
+
+        // Try envelope decryption first; fall back to plaintext for legacy data
+        let plaintext = if self.encrypt_enabled {
+            match crypto::open(self.key_provider.as_ref(), &stored)? {
+                Some(decrypted) => decrypted,
+                None => {
+                    // Legacy plaintext — re-encrypt on next store
+                    info!(
+                        org_id = %org_id, app_id = %app_id,
+                        "Genesis loaded as plaintext (legacy); will encrypt on next write"
+                    );
+                    stored
+                }
+            }
+        } else {
+            stored
+        };
+
+        MeshGenesis::decode(&plaintext)
+            .map_err(|e| anyhow::anyhow!("Failed to decode genesis: {e}"))
     }
 
     pub async fn count_recent_enrollments(&self, org_id: &str, since_ms: u64) -> Result<usize> {

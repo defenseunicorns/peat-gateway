@@ -45,6 +45,7 @@ async fn setup() -> Option<(TenantManager, CdcEngine, tempfile::TempDir)> {
             kafka_brokers: None,
         },
         ui_dir: None,
+        kek: None,
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();

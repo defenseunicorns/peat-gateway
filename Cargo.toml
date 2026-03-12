@@ -45,6 +45,10 @@ chrono = { version = "0.4", features = ["serde"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 hex = "0.4"
 
+# Envelope encryption
+aes-gcm = "0.10"
+zeroize = "1.8"
+
 # CDC sinks (optional)
 async-nats = { version = "0.38", optional = true }
 rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }

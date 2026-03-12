@@ -22,6 +22,7 @@ async fn spawn_app() -> (Client, String, tempfile::TempDir) {
             kafka_brokers: None,
         },
         ui_dir: None,
+        kek: None,
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
