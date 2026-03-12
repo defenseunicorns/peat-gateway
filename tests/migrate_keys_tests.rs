@@ -69,7 +69,7 @@ async fn migrate_encrypts_plaintext_genesis_records() {
     // Run migration with KEK
     let mut config_with_kek = base_config(&db_path);
     config_with_kek.kek = Some("cc".repeat(32));
-    peat_gateway::cli::migrate_keys(&config_with_kek)
+    peat_gateway::cli::migrate_keys(&config_with_kek, false)
         .await
         .unwrap();
 
@@ -147,7 +147,9 @@ async fn migrate_skips_already_encrypted_records() {
     assert_eq!(&before[..4], b"PENV");
 
     // Run migration — should skip this record
-    peat_gateway::cli::migrate_keys(&config).await.unwrap();
+    peat_gateway::cli::migrate_keys(&config, false)
+        .await
+        .unwrap();
 
     // Bytes should be identical (not re-encrypted)
     let after = {
@@ -214,7 +216,7 @@ async fn migrate_mixed_plaintext_and_encrypted() {
         kek: Some(kek_hex.clone()),
         ..base_config(&db_path)
     };
-    peat_gateway::cli::migrate_keys(&config_with_kek)
+    peat_gateway::cli::migrate_keys(&config_with_kek, false)
         .await
         .unwrap();
 
@@ -252,12 +254,56 @@ async fn migrate_mixed_plaintext_and_encrypted() {
 }
 
 #[tokio::test]
+async fn migrate_dry_run_does_not_modify_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.redb");
+    let config = base_config(&db_path);
+
+    // Create a plaintext formation
+    {
+        let mgr = TenantManager::new(&config).await.unwrap();
+        mgr.create_org("dry".into(), "Dry Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("dry", "app-1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+    }
+
+    // Capture plaintext bytes
+    let before = {
+        let store = peat_gateway::storage::open(&config.storage).await.unwrap();
+        store.get_genesis("dry", "app-1").await.unwrap().unwrap()
+    };
+    assert_ne!(&before[..4], b"PENV");
+
+    // Run dry-run migration
+    let config_with_kek = GatewayConfig {
+        kek: Some("aa".repeat(32)),
+        ..base_config(&db_path)
+    };
+    peat_gateway::cli::migrate_keys(&config_with_kek, true)
+        .await
+        .unwrap();
+
+    // Bytes should be unchanged — still plaintext
+    let after = {
+        let store = peat_gateway::storage::open(&config_with_kek.storage)
+            .await
+            .unwrap();
+        store.get_genesis("dry", "app-1").await.unwrap().unwrap()
+    };
+    assert_eq!(before, after, "Dry run should not modify any records");
+    assert_ne!(&after[..4], b"PENV", "Record should still be plaintext");
+}
+
+#[tokio::test]
 async fn migrate_fails_without_kek() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
     let config = base_config(&db_path);
 
-    let result = peat_gateway::cli::migrate_keys(&config).await;
+    let result = peat_gateway::cli::migrate_keys(&config, false).await;
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("PEAT_KEK"),
@@ -284,5 +330,7 @@ async fn migrate_no_formations_succeeds() {
         ..base_config(&db_path)
     };
     // Should succeed with nothing to migrate
-    peat_gateway::cli::migrate_keys(&config).await.unwrap();
+    peat_gateway::cli::migrate_keys(&config, false)
+        .await
+        .unwrap();
 }

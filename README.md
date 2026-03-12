@@ -111,7 +111,10 @@ PEAT_GATEWAY_BIND=0.0.0.0:8080 \
 PEAT_CDC_NATS_URL=nats://localhost:4222 \
 peat-gateway
 
-# Encrypt all plaintext genesis records after enabling PEAT_KEK
+# Preview which genesis records would be encrypted (no changes made)
+PEAT_KEK=<64-hex-chars> peat-gateway migrate-keys --dry-run
+
+# Encrypt all plaintext genesis records (stop the gateway first)
 PEAT_KEK=<64-hex-chars> peat-gateway migrate-keys
 ```
 

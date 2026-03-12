@@ -12,7 +12,11 @@ use crate::storage;
 /// Iterates every org → formation → genesis record. Records that already have
 /// the `PENV` envelope header are skipped. Plaintext records are sealed with
 /// the configured KEK and written back.
-pub async fn migrate_keys(config: &GatewayConfig) -> Result<()> {
+///
+/// **Important:** Stop the gateway before running this command. Concurrent
+/// access to the storage backend during migration can cause data races
+/// (Postgres) or lock conflicts (Redb).
+pub async fn migrate_keys(config: &GatewayConfig, dry_run: bool) -> Result<()> {
     let kek_hex = config
         .kek
         .as_deref()
@@ -22,9 +26,14 @@ pub async fn migrate_keys(config: &GatewayConfig) -> Result<()> {
     let store = storage::open(&config.storage).await?;
 
     let orgs = store.list_orgs().await?;
-    let mut migrated = 0u64;
-    let mut skipped = 0u64;
-    let mut total = 0u64;
+    let mut migrated: usize = 0;
+    let mut already_encrypted: usize = 0;
+    let mut missing_genesis: usize = 0;
+    let mut total: usize = 0;
+
+    if dry_run {
+        eprintln!("dry-run: no records will be modified");
+    }
 
     for org in &orgs {
         let formations = store.list_formations(&org.org_id).await?;
@@ -35,12 +44,21 @@ pub async fn migrate_keys(config: &GatewayConfig) -> Result<()> {
                     org_id = %org.org_id, app_id = %formation.app_id,
                     "No genesis record found, skipping"
                 );
-                skipped += 1;
+                missing_genesis += 1;
                 continue;
             };
 
             if crypto::is_envelope(&raw) {
-                skipped += 1;
+                already_encrypted += 1;
+                continue;
+            }
+
+            if dry_run {
+                eprintln!(
+                    "dry-run: would encrypt org={} app={}",
+                    org.org_id, formation.app_id
+                );
+                migrated += 1;
                 continue;
             }
 
@@ -72,13 +90,17 @@ pub async fn migrate_keys(config: &GatewayConfig) -> Result<()> {
     info!(
         total = total,
         migrated = migrated,
-        skipped = skipped,
+        already_encrypted = already_encrypted,
+        missing_genesis = missing_genesis,
         "Key migration complete"
     );
 
-    if migrated == 0 && total > 0 {
-        info!("All genesis records were already encrypted");
-    }
+    // Always print summary to stdout so operators see it regardless of RUST_LOG
+    let verb = if dry_run { "would migrate" } else { "migrated" };
+    eprintln!(
+        "migrate-keys: {migrated} {verb}, {already_encrypted} already encrypted, \
+         {missing_genesis} missing genesis, {total} total formations"
+    );
 
     Ok(())
 }

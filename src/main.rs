@@ -19,8 +19,13 @@ struct Cli {
 enum Command {
     /// Start the gateway API server (default)
     Serve,
-    /// Encrypt all plaintext genesis records with the configured KEK
-    MigrateKeys,
+    /// Encrypt all plaintext genesis records with the configured KEK.
+    /// Stop the gateway before running this command.
+    MigrateKeys {
+        /// Preview what would be migrated without modifying any records
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -29,24 +34,24 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("peat_gateway=info".parse()?))
         .init();
 
-    let cli = Cli::parse();
+    let args = Cli::parse();
     let config = config::GatewayConfig::from_env()?;
 
-    match cli.command.unwrap_or(Command::Serve) {
-        Command::Serve => serve(config).await,
-        Command::MigrateKeys => cli::migrate_keys(&config).await,
+    match args.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve(&config).await,
+        Command::MigrateKeys { dry_run } => cli::migrate_keys(&config, dry_run).await,
     }
 }
 
-async fn serve(config: config::GatewayConfig) -> Result<()> {
+async fn serve(config: &config::GatewayConfig) -> Result<()> {
     info!(
         bind = %config.bind_addr,
         storage = ?config.storage,
         "Starting peat-gateway"
     );
 
-    let tenant_mgr = tenant::TenantManager::new(&config).await?;
-    let cdc_engine = cdc::CdcEngine::new(&config, tenant_mgr.clone()).await?;
+    let tenant_mgr = tenant::TenantManager::new(config).await?;
+    let cdc_engine = cdc::CdcEngine::new(config, tenant_mgr.clone()).await?;
     let app = api::router(tenant_mgr, cdc_engine, config.ui_dir.as_deref());
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
