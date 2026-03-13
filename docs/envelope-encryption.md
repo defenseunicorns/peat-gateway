@@ -59,32 +59,50 @@ Direct encryption with a single key is simpler but has operational problems:
 ## KeyProvider Trait
 
 ```rust
+#[async_trait]
 pub trait KeyProvider: Send + Sync {
-    fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>>;
-    fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>>;
+    async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>>;
+    async fn unwrap_dek(&self, wrapped: &[u8]) -> Result<Vec<u8>>;
 }
 ```
 
-The trait is synchronous — local AES-GCM operations don't need async. KMS/Vault providers that need network calls can use `block_on` internally or the trait can be made async behind a feature gate when those providers ship.
+The trait is async (`#[async_trait]`) to support network-backed providers (KMS, Vault) without blocking the runtime.
 
-Three planned implementations:
+Four implementations:
 
-1. **`LocalKeyProvider`** — AES-256-GCM with a KEK from `PEAT_KEK` env var. Ships first. No external dependencies.
-2. **`KmsKeyProvider`** — AWS KMS `GenerateDataKey` / `Decrypt`. Feature-gated behind `kms`.
-3. **`VaultTransitKeyProvider`** — HashiCorp Vault Transit engine via `vaultrs`. Feature-gated behind `vault`.
+| Provider | Feature | KEK location | Env vars |
+|----------|---------|-------------|----------|
+| `PlaintextProvider` | (always) | None — no encryption | — |
+| `LocalKeyProvider` | (always) | Local AES-256-GCM key from environment | `PEAT_KEK` |
+| `AwsKmsProvider` | `aws-kms` | AWS KMS — key never leaves KMS boundary | `PEAT_KMS_KEY_ARN` + standard AWS SDK env |
+| `VaultTransitProvider` | `vault` | Vault Transit engine | `PEAT_VAULT_ADDR`, `PEAT_VAULT_TOKEN`, `PEAT_VAULT_TRANSIT_KEY` |
 
-The `LocalKeyProvider` is the default and only implementation in this first pass. The trait exists so KMS/Vault can be added without touching storage code.
+### Provider Selection
+
+`build_key_provider()` selects the active provider by priority:
+
+1. **AWS KMS** — if `aws-kms` feature compiled and `PEAT_KMS_KEY_ARN` set
+2. **Vault Transit** — if `vault` feature compiled and `PEAT_VAULT_ADDR` set
+3. **Local KEK** — if `PEAT_KEK` set
+4. **Plaintext** — fallback (dev/test only, no encryption)
 
 ## Migration
 
 Existing plaintext genesis records need a one-time migration. The approach:
 
-1. When `PEAT_KEK` is not set, the gateway operates in plaintext mode (current behavior). No encryption, no decryption. This preserves backward compatibility for dev/test.
-2. When `PEAT_KEK` is set, all writes are encrypted. Reads attempt decryption first; if decryption fails (no envelope header), fall back to reading as plaintext and re-encrypt on next write.
-3. `peat-gateway migrate-keys` encrypts all plaintext genesis records in-place. Run once after setting `PEAT_KEK` in production.
+1. When no key provider is configured, the gateway operates in plaintext mode (current behavior). No encryption, no decryption. This preserves backward compatibility for dev/test.
+2. When any key provider is configured (`PEAT_KEK`, `PEAT_KMS_KEY_ARN`, or `PEAT_VAULT_ADDR`), all writes are encrypted. Reads attempt decryption first; if decryption fails (no envelope header), fall back to reading as plaintext and re-encrypt on next write.
+3. `peat-gateway migrate-keys` encrypts all plaintext genesis records in-place. Run once after configuring a key provider in production.
 
 ```bash
+# Local KEK
 PEAT_KEK=<64-hex-chars> peat-gateway migrate-keys
+
+# AWS KMS
+PEAT_KMS_KEY_ARN=arn:aws:kms:... peat-gateway migrate-keys
+
+# Vault Transit
+PEAT_VAULT_ADDR=https://vault:8200 PEAT_VAULT_TOKEN=s.xxx peat-gateway migrate-keys
 ```
 
 The subcommand iterates every org → formation → genesis record, skips records that already have the `PENV` envelope header, and seals plaintext records with the configured KEK. Each record is verified via roundtrip (seal → open → compare) before the encrypted bytes are written back, so a failure mid-migration leaves already-migrated records encrypted and un-migrated records as plaintext — the gateway handles both transparently.
