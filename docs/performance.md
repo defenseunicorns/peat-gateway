@@ -95,6 +95,73 @@ Every org/formation CRUD operation and every cursor update hits the storage back
 - Is there a constraint on the number of open file descriptors (relevant for Iroh UDP sockets)?
 - PVC size constraints for redb-backed deployments?
 
+## Baseline Load Test Results (2026-03-13, Unoptimized)
+
+Measured with `cargo run --features loadtest` (debug profile, single-threaded redb, local loopback). 10 concurrent workers, 30 seconds per scenario. KEK-enabled (AES-256-GCM envelope encryption active). All formations created with `enrollment_policy: Open`.
+
+These are **unoptimized baseline numbers** — debug build, no connection pooling, no tuning. They establish a floor for future optimization work.
+
+### Scenario: `enroll` (enrollment throughput)
+
+Exercises the full enrollment hot path: genesis load + AES-256-GCM decrypt, Ed25519 cert issuance, audit log append.
+
+| Metric | Value |
+|--------|-------|
+| Total requests | 4,113 |
+| Throughput | 136.8 req/s |
+| Success rate | 100% |
+| p50 latency | 71.7 ms |
+| p95 latency | 135.5 ms |
+| p99 latency | 142.1 ms |
+| max latency | 150.1 ms |
+
+### Scenario: `cdc` (CDC publish throughput)
+
+Exercises CDC event creation and webhook fan-out (local echo server).
+
+| Metric | Value |
+|--------|-------|
+| Total requests | 306,795 |
+| Throughput | 10,239 req/s |
+| Success rate | 100% |
+| p50 latency | 0.96 ms |
+| p95 latency | 1.16 ms |
+| p99 latency | 1.35 ms |
+| max latency | 7.2 ms |
+
+### Scenario: `mixed` (realistic workload)
+
+~40% enrollment, ~30% CDC publish, ~20% reads, ~10% writes.
+
+| Metric | Value |
+|--------|-------|
+| Total requests | 8,520 |
+| Throughput | 283.7 req/s |
+| Success rate | 100% |
+| p50 latency | 11.6 ms |
+| p95 latency | 119.7 ms |
+| p99 latency | 131.4 ms |
+| max latency | 142.3 ms |
+
+**Per-endpoint breakdown (mixed):**
+
+| Endpoint | Count | % | p50 | p95 |
+|----------|-------|---|-----|-----|
+| `POST .../enroll` | 3,994 | 47% | 67.2 ms | 127.0 ms |
+| `POST .../cdc/test` | 2,523 | 30% | 7.5 ms | 13.2 ms |
+| `GET .../formations` | 668 | 8% | 6.0 ms | 11.0 ms |
+| `GET /orgs/:id` | 666 | 8% | 0.4 ms | 0.5 ms |
+| `POST .../formations` | 334 | 4% | 10.1 ms | 15.4 ms |
+| `POST .../sinks` | 201 | 2% | 6.0 ms | 8.8 ms |
+| `GET /health` | 134 | 2% | 0.3 ms | 0.3 ms |
+
+### Observations
+
+- **Enrollment is the bottleneck.** At 72ms p50, the crypto path (genesis decrypt + Ed25519 signing) dominates. This is the path most likely to benefit from optimization (release build, caching decrypted genesis, connection keep-alive).
+- **CDC publish is fast.** 10K req/s at sub-millisecond latency with webhook delivery included. The webhook echo server is local, so real-world numbers will be higher, but the internal path is not a concern.
+- **Mixed throughput is enrollment-bound.** The 284 req/s aggregate is dragged down by the 40% enrollment weight. Read paths (org lookup, formation list) are sub-millisecond.
+- **Zero errors across all scenarios.** Quota bumps and Open enrollment policy keep the test focused on throughput, not policy enforcement.
+
 ## Benchmarking Plan
 
 Once scale parameters are defined, we should benchmark:
