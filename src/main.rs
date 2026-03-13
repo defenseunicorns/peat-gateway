@@ -26,6 +26,25 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run load tests against a local gateway instance
+    #[cfg(feature = "loadtest")]
+    LoadTest {
+        /// Concurrent workers
+        #[arg(long, default_value_t = 10)]
+        concurrency: usize,
+        /// Test duration in seconds
+        #[arg(long, default_value_t = 30)]
+        duration: u64,
+        /// Scenario: mixed, read-heavy, burst, multi-org
+        #[arg(long, default_value = "mixed")]
+        scenario: String,
+        /// Number of orgs for multi-org scenario
+        #[arg(long, default_value_t = 3)]
+        orgs: usize,
+        /// Write JSON report to file
+        #[arg(long)]
+        output: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -40,6 +59,14 @@ async fn main() -> Result<()> {
     match args.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(&config).await,
         Command::MigrateKeys { dry_run } => cli::migrate_keys(&config, dry_run).await,
+        #[cfg(feature = "loadtest")]
+        Command::LoadTest {
+            concurrency,
+            duration,
+            scenario,
+            orgs,
+            output,
+        } => cli::load_test(concurrency, duration, scenario, orgs, output).await,
     }
 }
 
