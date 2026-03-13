@@ -58,6 +58,9 @@ impl TenantManager {
     // --- Organizations ---
 
     pub async fn create_org(&self, org_id: String, display_name: String) -> Result<Organization> {
+        validate_identifier(&org_id, "org_id")?;
+        validate_display_name(&display_name)?;
+
         if self.store.get_org(&org_id).await?.is_some() {
             bail!("Organization '{}' already exists", org_id);
         }
@@ -126,6 +129,8 @@ impl TenantManager {
         app_id: String,
         enrollment_policy: super::models::EnrollmentPolicy,
     ) -> Result<FormationConfig> {
+        validate_identifier(&app_id, "app_id")?;
+
         // Verify org exists
         let org = self.get_org(org_id).await?;
 
@@ -251,6 +256,8 @@ impl TenantManager {
         max_uses: Option<u32>,
         expires_at: Option<u64>,
     ) -> Result<EnrollmentToken> {
+        validate_non_empty(&label, "label")?;
+
         // Verify org and formation exist
         self.get_org(org_id).await?;
         self.get_formation(org_id, &app_id).await?;
@@ -319,6 +326,7 @@ impl TenantManager {
     // --- CDC Sinks ---
 
     pub async fn create_sink(&self, org_id: &str, sink_type: CdcSinkType) -> Result<CdcSinkConfig> {
+        validate_sink_type(&sink_type)?;
         let org = self.get_org(org_id).await?;
 
         // Check quota
@@ -421,6 +429,9 @@ impl TenantManager {
         client_id: String,
         client_secret: String,
     ) -> Result<IdpConfig> {
+        validate_issuer_url(&issuer_url)?;
+        validate_non_empty(&client_id, "client_id")?;
+        validate_non_empty(&client_secret, "client_secret")?;
         self.get_org(org_id).await?;
 
         let idp_id = {
@@ -541,4 +552,83 @@ impl TenantManager {
         self.get_org(org_id).await?;
         self.store.list_audit(org_id, app_id, limit).await
     }
+}
+
+// ── Input validation ────────────────────────────────────────────────────────
+
+const MAX_IDENTIFIER_LEN: usize = 256;
+const MAX_DISPLAY_NAME_LEN: usize = 1024;
+
+/// Validate an identifier field (org_id, app_id, etc.):
+/// non-empty, no null bytes, within length limit.
+fn validate_identifier(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if value.len() > MAX_IDENTIFIER_LEN {
+        bail!(
+            "{field} exceeds maximum length ({} > {MAX_IDENTIFIER_LEN})",
+            value.len()
+        );
+    }
+    if value.contains('\0') {
+        bail!("{field} must not contain null bytes");
+    }
+    Ok(())
+}
+
+/// Validate a display name: non-empty, within length limit.
+fn validate_display_name(value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("display_name must not be empty");
+    }
+    if value.len() > MAX_DISPLAY_NAME_LEN {
+        bail!(
+            "display_name exceeds maximum length ({} > {MAX_DISPLAY_NAME_LEN})",
+            value.len()
+        );
+    }
+    Ok(())
+}
+
+/// Validate a required non-empty string field.
+fn validate_non_empty(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{field} must not be empty");
+    }
+    Ok(())
+}
+
+/// Validate a CDC sink type's contents.
+fn validate_sink_type(sink_type: &CdcSinkType) -> Result<()> {
+    match sink_type {
+        CdcSinkType::Webhook { url } => validate_http_url(url, "webhook url")?,
+        CdcSinkType::Nats { subject_prefix } => {
+            validate_non_empty(subject_prefix, "subject_prefix")?
+        }
+        CdcSinkType::Kafka { topic } => validate_non_empty(topic, "topic")?,
+    }
+    Ok(())
+}
+
+/// Validate that a URL is http:// or https://.
+fn validate_http_url(url: &str, field: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("{field} must not be empty");
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        bail!("{field} must use http:// or https:// scheme");
+    }
+    Ok(())
+}
+
+/// Validate an OIDC issuer URL: must be HTTPS.
+fn validate_issuer_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("issuer_url must not be empty");
+    }
+    if !url.starts_with("https://") {
+        bail!("issuer_url must use https:// scheme");
+    }
+    Ok(())
 }
