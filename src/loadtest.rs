@@ -78,10 +78,7 @@ fn aggregate(
     duration_secs: u64,
 ) -> LoadTestReport {
     let total_requests = samples.len();
-    let successful = samples
-        .iter()
-        .filter(|s| s.status > 0 && s.status < 400)
-        .count();
+    let successful = samples.iter().filter(|s| s.status < 400).count();
     let failed = total_requests - successful;
 
     let mut all_latencies: Vec<u64> = samples.iter().map(|s| s.latency_us).collect();
@@ -112,7 +109,7 @@ fn aggregate(
     // Error breakdown
     let mut error_breakdown: HashMap<u16, usize> = HashMap::new();
     for s in &samples {
-        if s.status >= 400 || s.status == 0 {
+        if s.status >= 400 {
             *error_breakdown.entry(s.status).or_default() += 1;
         }
     }
@@ -303,40 +300,36 @@ impl WorkerState {
     }
 }
 
+/// Execute a single operation. Returns `None` when the worker has no state to
+/// operate on (e.g. GetFormation with an empty app_ids list) — callers should
+/// skip recording a sample rather than logging a fake failure.
 async fn execute_op(
     client: &Client,
     base: &str,
     state: &mut WorkerState,
     op: Operation,
-) -> (String, u16) {
+) -> Option<(String, u16)> {
     match op {
         Operation::CreateOrg => {
             let resp = client
                 .post(format!("{base}/orgs"))
                 .json(&json!({"org_id": &state.org_id, "display_name": &state.org_id}))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => ("POST /orgs".into(), r.status().as_u16()),
-                Err(_) => ("POST /orgs".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some(("POST /orgs".into(), resp.status().as_u16()))
         }
         Operation::GetOrg => {
             let resp = client
                 .get(format!("{base}/orgs/{}", state.org_id))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => ("GET /orgs/:id".into(), r.status().as_u16()),
-                Err(_) => ("GET /orgs/:id".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some(("GET /orgs/:id".into(), resp.status().as_u16()))
         }
         Operation::ListOrgs => {
-            let resp = client.get(format!("{base}/orgs")).send().await;
-            match resp {
-                Ok(r) => ("GET /orgs".into(), r.status().as_u16()),
-                Err(_) => ("GET /orgs".into(), 0),
-            }
+            let resp = client.get(format!("{base}/orgs")).send().await.ok()?;
+            Some(("GET /orgs".into(), resp.status().as_u16()))
         }
         Operation::CreateFormation => {
             let app_id = state.next_app_id();
@@ -344,71 +337,53 @@ async fn execute_op(
                 .post(format!("{base}/orgs/{}/formations", state.org_id))
                 .json(&json!({"app_id": &app_id}))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    if status < 400 {
-                        state.app_ids.push(app_id);
-                    }
-                    ("POST /orgs/:id/formations".into(), status)
-                }
-                Err(_) => ("POST /orgs/:id/formations".into(), 0),
+                .await
+                .ok()?;
+            let status = resp.status().as_u16();
+            if status < 400 {
+                state.app_ids.push(app_id);
             }
+            Some(("POST /orgs/:id/formations".into(), status))
         }
         Operation::GetFormation => {
             if state.app_ids.is_empty() {
-                return ("GET /orgs/:id/formations/:id".into(), 0);
+                return None;
             }
             let idx = state.formation_counter % state.app_ids.len();
             let app_id = state.app_ids[idx].clone();
             let resp = client
                 .get(format!("{base}/orgs/{}/formations/{app_id}", state.org_id))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => ("GET /orgs/:id/formations/:id".into(), r.status().as_u16()),
-                Err(_) => ("GET /orgs/:id/formations/:id".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some((
+                "GET /orgs/:id/formations/:id".into(),
+                resp.status().as_u16(),
+            ))
         }
         Operation::ListFormations => {
             let resp = client
                 .get(format!("{base}/orgs/{}/formations", state.org_id))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => ("GET /orgs/:id/formations".into(), r.status().as_u16()),
-                Err(_) => ("GET /orgs/:id/formations".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some(("GET /orgs/:id/formations".into(), resp.status().as_u16()))
         }
         Operation::DeleteFormation => {
-            if let Some(app_id) = state.app_ids.pop() {
-                let resp = client
-                    .delete(format!("{base}/orgs/{}/formations/{app_id}", state.org_id))
-                    .send()
-                    .await;
-                match resp {
-                    Ok(r) => (
-                        "DELETE /orgs/:id/formations/:id".into(),
-                        r.status().as_u16(),
-                    ),
-                    Err(_) => ("DELETE /orgs/:id/formations/:id".into(), 0),
-                }
-            } else {
-                // Nothing to delete — fall back to a list
-                let resp = client
-                    .get(format!("{base}/orgs/{}/formations", state.org_id))
-                    .send()
-                    .await;
-                match resp {
-                    Ok(r) => ("GET /orgs/:id/formations".into(), r.status().as_u16()),
-                    Err(_) => ("GET /orgs/:id/formations".into(), 0),
-                }
-            }
+            let app_id = state.app_ids.pop()?;
+            let resp = client
+                .delete(format!("{base}/orgs/{}/formations/{app_id}", state.org_id))
+                .send()
+                .await
+                .ok()?;
+            Some((
+                "DELETE /orgs/:id/formations/:id".into(),
+                resp.status().as_u16(),
+            ))
         }
         Operation::CreateToken => {
             if state.app_ids.is_empty() {
-                return ("POST /orgs/:id/tokens".into(), 0);
+                return None;
             }
             let app_id = state.app_ids[0].clone();
             let label = format!("w{}-tok-{}", state.worker_id, state.token_ids.len());
@@ -416,42 +391,35 @@ async fn execute_op(
                 .post(format!("{base}/orgs/{}/tokens", state.org_id))
                 .json(&json!({"app_id": &app_id, "label": &label}))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    if status < 400 {
-                        if let Ok(body) = r.json::<serde_json::Value>().await {
-                            if let Some(tid) = body["token_id"].as_str() {
-                                state.token_ids.push(tid.to_string());
-                            }
-                        }
+                .await
+                .ok()?;
+            let status = resp.status().as_u16();
+            if status < 400 {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(tid) = body["token_id"].as_str() {
+                        state.token_ids.push(tid.to_string());
                     }
-                    ("POST /orgs/:id/tokens".into(), status)
                 }
-                Err(_) => ("POST /orgs/:id/tokens".into(), 0),
             }
+            Some(("POST /orgs/:id/tokens".into(), status))
         }
         Operation::ListTokens => {
-            let app_id = if state.app_ids.is_empty() {
-                "x"
-            } else {
-                &state.app_ids[0]
-            };
+            if state.app_ids.is_empty() {
+                return None;
+            }
+            let app_id = &state.app_ids[0];
             let resp = client
                 .get(format!(
                     "{base}/orgs/{}/formations/{app_id}/tokens",
                     state.org_id
                 ))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => (
-                    "GET /orgs/:id/formations/:id/tokens".into(),
-                    r.status().as_u16(),
-                ),
-                Err(_) => ("GET /orgs/:id/formations/:id/tokens".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some((
+                "GET /orgs/:id/formations/:id/tokens".into(),
+                resp.status().as_u16(),
+            ))
         }
         Operation::CreateSink => {
             let prefix = format!(
@@ -464,53 +432,39 @@ async fn execute_op(
                 .post(format!("{base}/orgs/{}/sinks", state.org_id))
                 .json(&json!({"sink_type": {"Nats": {"subject_prefix": prefix}}}))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => {
-                    let status = r.status().as_u16();
-                    if status < 400 {
-                        if let Ok(body) = r.json::<serde_json::Value>().await {
-                            if let Some(sid) = body["sink_id"].as_str() {
-                                state.sink_ids.push(sid.to_string());
-                            }
-                        }
+                .await
+                .ok()?;
+            let status = resp.status().as_u16();
+            if status < 400 {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(sid) = body["sink_id"].as_str() {
+                        state.sink_ids.push(sid.to_string());
                     }
-                    ("POST /orgs/:id/sinks".into(), status)
                 }
-                Err(_) => ("POST /orgs/:id/sinks".into(), 0),
             }
+            Some(("POST /orgs/:id/sinks".into(), status))
         }
         Operation::ListSinks => {
             let resp = client
                 .get(format!("{base}/orgs/{}/sinks", state.org_id))
                 .send()
-                .await;
-            match resp {
-                Ok(r) => ("GET /orgs/:id/sinks".into(), r.status().as_u16()),
-                Err(_) => ("GET /orgs/:id/sinks".into(), 0),
-            }
+                .await
+                .ok()?;
+            Some(("GET /orgs/:id/sinks".into(), resp.status().as_u16()))
         }
         Operation::ToggleSink => {
-            if let Some(sink_id) = state.sink_ids.first().cloned() {
-                let resp = client
-                    .patch(format!("{base}/orgs/{}/sinks/{sink_id}", state.org_id))
-                    .json(&json!({"enabled": false}))
-                    .send()
-                    .await;
-                match resp {
-                    Ok(r) => ("PATCH /orgs/:id/sinks/:id".into(), r.status().as_u16()),
-                    Err(_) => ("PATCH /orgs/:id/sinks/:id".into(), 0),
-                }
-            } else {
-                ("PATCH /orgs/:id/sinks/:id".into(), 0)
-            }
+            let sink_id = state.sink_ids.first()?.clone();
+            let resp = client
+                .patch(format!("{base}/orgs/{}/sinks/{sink_id}", state.org_id))
+                .json(&json!({"enabled": false}))
+                .send()
+                .await
+                .ok()?;
+            Some(("PATCH /orgs/:id/sinks/:id".into(), resp.status().as_u16()))
         }
         Operation::HealthCheck => {
-            let resp = client.get(format!("{base}/health")).send().await;
-            match resp {
-                Ok(r) => ("GET /health".into(), r.status().as_u16()),
-                Err(_) => ("GET /health".into(), 0),
-            }
+            let resp = client.get(format!("{base}/health")).send().await.ok()?;
+            Some(("GET /health".into(), resp.status().as_u16()))
         }
     }
 }
@@ -600,8 +554,25 @@ async fn run_worker(
     let mut state = WorkerState::new(worker_id, org_id);
     let epoch = Instant::now();
 
-    // Setup: create org + a couple of seed formations + a sink
+    // Setup: create org, raise quotas so the test isn't bottlenecked by defaults,
+    // then seed a couple of formations + a sink for read operations to target.
     let _ = execute_op(&client, &base, &mut state, Operation::CreateOrg).await;
+
+    // Raise quotas — default max_formations=10 / max_cdc_sinks=5 are hit almost
+    // instantly under load, turning the test into a quota-error benchmark.
+    let _ = client
+        .patch(format!("{base}/orgs/{}", state.org_id))
+        .json(&json!({
+            "quotas": {
+                "max_formations": 100_000,
+                "max_peers_per_formation": 100,
+                "max_documents_per_formation": 10_000,
+                "max_cdc_sinks": 100_000
+            }
+        }))
+        .send()
+        .await;
+
     let _ = execute_op(&client, &base, &mut state, Operation::CreateFormation).await;
     let _ = execute_op(&client, &base, &mut state, Operation::CreateFormation).await;
     let _ = execute_op(&client, &base, &mut state, Operation::CreateSink).await;
@@ -621,16 +592,17 @@ async fn run_worker(
         counter = counter.wrapping_add(7);
 
         let req_start = Instant::now();
-        let (endpoint, status) = execute_op(&client, &base, &mut state, op).await;
-        let latency_us = req_start.elapsed().as_micros() as u64;
-        let timestamp_ms = epoch.elapsed().as_millis() as u64;
+        if let Some((endpoint, status)) = execute_op(&client, &base, &mut state, op).await {
+            let latency_us = req_start.elapsed().as_micros() as u64;
+            let timestamp_ms = epoch.elapsed().as_millis() as u64;
 
-        let _ = tx.send(RequestSample {
-            endpoint,
-            status,
-            latency_us,
-            timestamp_ms,
-        });
+            let _ = tx.send(RequestSample {
+                endpoint,
+                status,
+                latency_us,
+                timestamp_ms,
+            });
+        }
     }
 }
 
