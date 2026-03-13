@@ -89,6 +89,10 @@ fn make_config(url: &str, kek: Option<&str>) -> GatewayConfig {
         },
         ui_dir: None,
         kek: kek.map(String::from),
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     }
 }
 

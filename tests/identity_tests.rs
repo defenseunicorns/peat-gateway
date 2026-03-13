@@ -25,6 +25,10 @@ async fn setup() -> (TenantManager, axum::Router, tempfile::TempDir) {
         },
         ui_dir: None,
         kek: None,
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
@@ -730,6 +734,10 @@ async fn setup_encrypted() -> (TenantManager, axum::Router, tempfile::TempDir) {
         },
         ui_dir: None,
         kek: Some("aa".repeat(32)),
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
@@ -790,6 +798,10 @@ async fn encrypted_genesis_stored_bytes_are_not_plaintext() {
         },
         ui_dir: None,
         kek: Some("bb".repeat(32)),
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     };
     // Create org + formation (encrypts genesis), then drop to release redb lock
     {

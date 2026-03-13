@@ -46,6 +46,10 @@ async fn setup() -> Option<(TenantManager, CdcEngine, tempfile::TempDir)> {
         },
         ui_dir: None,
         kek: None,
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();

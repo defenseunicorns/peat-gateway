@@ -51,11 +51,16 @@ hex = "0.4"
 # Envelope encryption
 aes-gcm = "0.10"
 zeroize = "1.8"
+base64 = { version = "0.22", optional = true }
 
 # CDC sinks (optional)
 async-nats = { version = "0.38", optional = true }
 rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# KMS (optional)
+aws-sdk-kms = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 
 # Identity (optional)
 openidconnect = { version = "4", optional = true }
@@ -75,7 +80,9 @@ kafka = ["dep:rdkafka"]
 webhook = ["dep:reqwest"]
 oidc = ["dep:openidconnect"]
 postgres = ["dep:sqlx"]
-full = ["nats", "kafka", "webhook", "oidc", "postgres"]
+aws-kms = ["dep:aws-sdk-kms", "dep:aws-config"]
+vault = ["dep:reqwest", "dep:base64"]
+full = ["nats", "kafka", "webhook", "oidc", "postgres", "aws-kms", "vault"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
@@ -85,4 +92,5 @@ async-nats = "0.38"
 futures = "0.3"
 peat-mesh = { version = "0.5", features = ["automerge-backend"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+base64 = "0.22"
 hex = "0.4"

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use tracing::info;
 
 use crate::config::GatewayConfig;
-use crate::crypto::{self, LocalKeyProvider};
+use crate::crypto::{self, KeyProvider};
 use crate::storage;
 
 /// Encrypt all plaintext genesis records in-place.
@@ -17,11 +17,11 @@ use crate::storage;
 /// access to the storage backend during migration can cause data races
 /// (Postgres) or lock conflicts (Redb).
 pub async fn migrate_keys(config: &GatewayConfig, dry_run: bool) -> Result<()> {
-    let kek_hex = config
-        .kek
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("PEAT_KEK must be set to run migrate-keys"))?;
-    let provider = LocalKeyProvider::from_hex(kek_hex)?;
+    let (provider, encrypt_enabled) = crypto::build_key_provider(config).await?;
+    if !encrypt_enabled {
+        bail!("No key provider configured. Set PEAT_KEK, PEAT_KMS_KEY_ARN, or PEAT_VAULT_ADDR.");
+    }
+    let provider: &dyn KeyProvider = provider.as_ref();
 
     let store = storage::open(&config.storage).await?;
 
@@ -63,10 +63,10 @@ pub async fn migrate_keys(config: &GatewayConfig, dry_run: bool) -> Result<()> {
             }
 
             // Plaintext — encrypt and store back
-            let sealed = crypto::seal(&provider, &raw)?;
+            let sealed = crypto::seal(provider, &raw).await?;
 
             // Verify roundtrip before overwriting
-            let decrypted = crypto::open(&provider, &sealed)?.ok_or_else(|| {
+            let decrypted = crypto::open(provider, &sealed).await?.ok_or_else(|| {
                 anyhow::anyhow!("Roundtrip verification failed: seal produced non-envelope output")
             })?;
             if decrypted != raw {

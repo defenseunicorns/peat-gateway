@@ -15,6 +15,14 @@ pub struct GatewayConfig {
     /// Hex-encoded 256-bit key-encryption key for genesis envelope encryption.
     /// When absent, genesis data is stored in plaintext (dev/test mode).
     pub kek: Option<String>,
+    /// AWS KMS key ARN for DEK wrapping (requires `aws-kms` feature).
+    pub kms_key_arn: Option<String>,
+    /// HashiCorp Vault server address (requires `vault` feature).
+    pub vault_addr: Option<String>,
+    /// Vault authentication token.
+    pub vault_token: Option<String>,
+    /// Vault Transit secret engine key name.
+    pub vault_transit_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +67,10 @@ impl GatewayConfig {
             },
             ui_dir: env::var("PEAT_UI_DIR").ok(),
             kek: env::var("PEAT_KEK").ok(),
+            kms_key_arn: env::var("PEAT_KMS_KEY_ARN").ok(),
+            vault_addr: env::var("PEAT_VAULT_ADDR").ok(),
+            vault_token: env::var("PEAT_VAULT_TOKEN").ok(),
+            vault_transit_key: env::var("PEAT_VAULT_TRANSIT_KEY").ok(),
         })
     }
 }

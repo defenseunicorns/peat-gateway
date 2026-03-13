@@ -9,7 +9,7 @@ use super::models::{
     OrgQuotas, Organization, PolicyRule,
 };
 use crate::config::GatewayConfig;
-use crate::crypto::{self, KeyProvider, LocalKeyProvider, PlaintextProvider};
+use crate::crypto::{self, KeyProvider};
 use crate::storage::{self, StorageBackend};
 
 #[derive(Clone)]
@@ -24,15 +24,26 @@ impl TenantManager {
         let store = storage::open(&config.storage).await?;
         let store: Arc<dyn StorageBackend> = Arc::from(store);
 
-        let (key_provider, encrypt_enabled): (Arc<dyn KeyProvider>, bool) =
-            if let Some(ref kek_hex) = config.kek {
-                let provider = LocalKeyProvider::from_hex(kek_hex)?;
-                info!("Genesis envelope encryption enabled");
-                (Arc::new(provider), true)
-            } else {
-                info!("Genesis envelope encryption disabled (PEAT_KEK not set)");
-                (Arc::new(PlaintextProvider), false)
-            };
+        let (key_provider, encrypt_enabled) = crypto::build_key_provider(config).await?;
+
+        let org_count = store.list_orgs().await?.len();
+        info!(orgs = org_count, "Tenant manager initialized");
+
+        Ok(Self {
+            store,
+            key_provider,
+            encrypt_enabled,
+        })
+    }
+
+    /// Construct with an explicit key provider (for testing / injection).
+    pub async fn with_key_provider(
+        config: &GatewayConfig,
+        key_provider: Arc<dyn KeyProvider>,
+        encrypt_enabled: bool,
+    ) -> Result<Self> {
+        let store = storage::open(&config.storage).await?;
+        let store: Arc<dyn StorageBackend> = Arc::from(store);
 
         let org_count = store.list_orgs().await?.len();
         info!(orgs = org_count, "Tenant manager initialized");
@@ -147,7 +158,7 @@ impl TenantManager {
 
         // Envelope-encrypt genesis if KEK is configured
         let stored_bytes = if self.encrypt_enabled {
-            crypto::seal(self.key_provider.as_ref(), &encoded)?
+            crypto::seal(self.key_provider.as_ref(), &encoded).await?
         } else {
             encoded
         };
@@ -203,7 +214,7 @@ impl TenantManager {
 
         // Try envelope decryption first; fall back to plaintext for legacy data
         let plaintext = if self.encrypt_enabled {
-            match crypto::open(self.key_provider.as_ref(), &stored)? {
+            match crypto::open(self.key_provider.as_ref(), &stored).await? {
                 Some(decrypted) => decrypted,
                 None => {
                     // Legacy plaintext — re-encrypt on next store
