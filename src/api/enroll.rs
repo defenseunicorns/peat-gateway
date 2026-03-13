@@ -398,6 +398,211 @@ mod inner {
             .route("/:org_id/formations/:app_id/enroll", post(enroll))
             .with_state(tenant_mgr)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        fn rule(
+            claim_key: &str,
+            claim_value: &str,
+            tier: MeshTier,
+            permissions: u32,
+            priority: u32,
+        ) -> crate::tenant::models::PolicyRule {
+            crate::tenant::models::PolicyRule {
+                rule_id: "test".into(),
+                org_id: "test".into(),
+                claim_key: claim_key.into(),
+                claim_value: claim_value.into(),
+                tier,
+                permissions,
+                priority,
+            }
+        }
+
+        fn claims(
+            pairs: &[(&str, serde_json::Value)],
+        ) -> serde_json::Map<String, serde_json::Value> {
+            let mut map = serde_json::Map::new();
+            for (k, v) in pairs {
+                map.insert((*k).to_string(), v.clone());
+            }
+            map
+        }
+
+        #[test]
+        fn string_claim_match() {
+            let rules = vec![rule("role", "admin", MeshTier::Authority, 0x0F, 10)];
+            let c = claims(&[("role", json!("admin"))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, permissions } => {
+                    assert_eq!(tier, MeshTier::Authority);
+                    assert_eq!(permissions, 0x0F);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn string_claim_no_match_defaults_to_endpoint() {
+            let rules = vec![rule("role", "admin", MeshTier::Authority, 0x0F, 10)];
+            let c = claims(&[("role", json!("viewer"))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, permissions } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                    assert_eq!(permissions, 0);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+
+        #[test]
+        fn bool_claim_true_match() {
+            let rules = vec![rule(
+                "email_verified",
+                "true",
+                MeshTier::Infrastructure,
+                0x01,
+                10,
+            )];
+            let c = claims(&[("email_verified", json!(true))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Infrastructure);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn bool_claim_false_match() {
+            let rules = vec![rule("disabled", "false", MeshTier::Endpoint, 0, 10)];
+            let c = claims(&[("disabled", json!(false))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn bool_claim_mismatch() {
+            let rules = vec![rule(
+                "email_verified",
+                "true",
+                MeshTier::Infrastructure,
+                0,
+                10,
+            )];
+            let c = claims(&[("email_verified", json!(false))]);
+            // No match → defaults to Endpoint
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+
+        #[test]
+        fn array_claim_contains_match() {
+            let rules = vec![rule(
+                "groups",
+                "operators",
+                MeshTier::Infrastructure,
+                0x03,
+                10,
+            )];
+            let c = claims(&[("groups", json!(["users", "operators", "viewers"]))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, permissions } => {
+                    assert_eq!(tier, MeshTier::Infrastructure);
+                    assert_eq!(permissions, 0x03);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn array_claim_no_match() {
+            let rules = vec![rule("groups", "admins", MeshTier::Authority, 0x0F, 10)];
+            let c = claims(&[("groups", json!(["users", "viewers"]))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+
+        #[test]
+        fn number_claim_match() {
+            let rules = vec![rule("level", "5", MeshTier::Infrastructure, 0x01, 10)];
+            let c = claims(&[("level", json!(5))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Infrastructure);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn number_claim_mismatch() {
+            let rules = vec![rule("level", "5", MeshTier::Infrastructure, 0x01, 10)];
+            let c = claims(&[("level", json!(3))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+
+        #[test]
+        fn priority_ordering_first_match_wins() {
+            let rules = vec![
+                rule("role", "admin", MeshTier::Authority, 0x0F, 100),
+                rule("role", "admin", MeshTier::Endpoint, 0, 10), // lower priority number = higher priority
+            ];
+            let c = claims(&[("role", json!("admin"))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    // Priority 10 should win over 100
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve"),
+            }
+        }
+
+        #[test]
+        fn no_rules_defaults_to_endpoint() {
+            let rules: Vec<crate::tenant::models::PolicyRule> = vec![];
+            let c = claims(&[("role", json!("anything"))]);
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, permissions } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                    assert_eq!(permissions, 0);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+
+        #[test]
+        fn missing_claim_key_skips_rule() {
+            let rules = vec![rule("role", "admin", MeshTier::Authority, 0x0F, 10)];
+            let c = claims(&[("email", json!("user@example.com"))]); // no "role" key
+            match evaluate_policy(&rules, &c) {
+                EnrollmentDecision::Approved { tier, .. } => {
+                    assert_eq!(tier, MeshTier::Endpoint);
+                }
+                EnrollmentDecision::Denied { .. } => panic!("should approve with default"),
+            }
+        }
+    }
 }
 
 #[cfg(feature = "oidc")]
