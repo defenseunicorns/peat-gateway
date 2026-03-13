@@ -36,6 +36,19 @@ impl TenantManager {
         })
     }
 
+    /// Construct with an explicit storage backend and key provider.
+    pub fn with_backend(
+        store: Arc<dyn StorageBackend>,
+        key_provider: Arc<dyn KeyProvider>,
+        encrypt_enabled: bool,
+    ) -> Self {
+        Self {
+            store,
+            key_provider,
+            encrypt_enabled,
+        }
+    }
+
     /// Construct with an explicit key provider (for testing / injection).
     pub async fn with_key_provider(
         config: &GatewayConfig,
