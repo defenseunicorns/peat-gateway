@@ -323,6 +323,59 @@ impl TenantManager {
         Ok(())
     }
 
+    /// Validate an enrollment token and increment its use counter.
+    ///
+    /// Checks: exists, belongs to the correct formation, not revoked,
+    /// not expired, not over max_uses. On success, increments `uses`
+    /// and persists the update.
+    pub async fn validate_and_consume_token(
+        &self,
+        org_id: &str,
+        app_id: &str,
+        token_id: &str,
+    ) -> Result<EnrollmentToken> {
+        let mut token = self.get_token(org_id, token_id).await?;
+
+        if token.app_id != app_id {
+            bail!("Token does not belong to formation '{}'", app_id);
+        }
+
+        if token.revoked {
+            bail!("Token '{}' has been revoked", token_id);
+        }
+
+        if let Some(expires_at) = token.expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now > expires_at {
+                bail!("Token '{}' has expired", token_id);
+            }
+        }
+
+        if let Some(max_uses) = token.max_uses {
+            if token.uses >= max_uses {
+                bail!(
+                    "Token '{}' has reached its maximum uses ({})",
+                    token_id,
+                    max_uses
+                );
+            }
+        }
+
+        token.uses += 1;
+        self.store.update_token(&token).await?;
+        info!(
+            org_id = %org_id,
+            app_id = %app_id,
+            token_id = %token_id,
+            uses = token.uses,
+            "Enrollment token consumed"
+        );
+        Ok(token)
+    }
+
     // --- CDC Sinks ---
 
     pub async fn create_sink(&self, org_id: &str, sink_type: CdcSinkType) -> Result<CdcSinkConfig> {
