@@ -7,3 +7,6 @@ pub mod config;
 pub mod crypto;
 pub mod storage;
 pub mod tenant;
+
+#[cfg(feature = "loadtest")]
+pub mod loadtest;

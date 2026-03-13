@@ -104,3 +104,15 @@ pub async fn migrate_keys(config: &GatewayConfig, dry_run: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(feature = "loadtest")]
+pub async fn load_test(
+    concurrency: usize,
+    duration_secs: u64,
+    scenario: String,
+    orgs: usize,
+    output: Option<String>,
+) -> Result<()> {
+    crate::loadtest::run(concurrency, duration_secs, scenario, orgs, output).await?;
+    Ok(())
+}
