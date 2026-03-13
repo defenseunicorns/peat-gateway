@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::KeyProvider;
 
@@ -17,7 +18,7 @@ pub struct VaultTransitProvider {
     client: Client,
     encrypt_url: String,
     decrypt_url: String,
-    token: String,
+    token: Zeroizing<String>,
 }
 
 impl VaultTransitProvider {
@@ -33,7 +34,7 @@ impl VaultTransitProvider {
             client,
             encrypt_url: format!("{addr}/v1/transit/encrypt/{key_name}"),
             decrypt_url: format!("{addr}/v1/transit/decrypt/{key_name}"),
-            token: token.to_string(),
+            token: Zeroizing::new(token.to_string()),
         })
     }
 }
@@ -89,14 +90,16 @@ fn b64_decode(s: &str) -> Result<Vec<u8>> {
 #[async_trait]
 impl KeyProvider for VaultTransitProvider {
     async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>> {
+        let plaintext_b64 = Zeroizing::new(b64_encode(dek));
         let body = EncryptRequest {
-            plaintext: b64_encode(dek),
+            plaintext: (*plaintext_b64).clone(),
         };
+        drop(plaintext_b64);
 
         let resp = self
             .client
             .post(&self.encrypt_url)
-            .header("X-Vault-Token", &self.token)
+            .header("X-Vault-Token", self.token.as_str())
             .json(&body)
             .send()
             .await
@@ -128,7 +131,7 @@ impl KeyProvider for VaultTransitProvider {
         let resp = self
             .client
             .post(&self.decrypt_url)
-            .header("X-Vault-Token", &self.token)
+            .header("X-Vault-Token", self.token.as_str())
             .json(&body)
             .send()
             .await
@@ -145,7 +148,9 @@ impl KeyProvider for VaultTransitProvider {
             .await
             .context("Failed to parse Vault Transit decrypt response")?;
 
-        let dek = b64_decode(&parsed.data.plaintext)?;
+        let plaintext_b64 = Zeroizing::new(parsed.data.plaintext);
+        let dek = b64_decode(&plaintext_b64)?;
+        drop(plaintext_b64);
         if dek.len() != 32 {
             bail!(
                 "Vault Transit returned DEK of {} bytes, expected 32",

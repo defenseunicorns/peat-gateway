@@ -213,3 +213,15 @@ async fn kms_cross_provider_failure() {
     // Local provider cannot open KMS-wrapped envelope
     assert!(crypto::open(&local_provider, &envelope).await.is_err());
 }
+
+#[tokio::test]
+async fn local_to_kms_cross_provider_failure() {
+    let local_provider = LocalKeyProvider::new([0xEE; 32]);
+    let kms_provider = mock_kms_provider([0xDD; 32]);
+
+    let plaintext = b"cross-provider reverse test";
+    let envelope = crypto::seal(&local_provider, plaintext).await.unwrap();
+
+    // KMS provider cannot open locally-wrapped envelope
+    assert!(crypto::open(&kms_provider, &envelope).await.is_err());
+}

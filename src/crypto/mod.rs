@@ -47,10 +47,10 @@ pub struct PlaintextProvider;
 #[async_trait]
 impl KeyProvider for PlaintextProvider {
     async fn wrap_dek(&self, _dek: &[u8]) -> Result<Vec<u8>> {
-        unreachable!("PlaintextProvider does not use DEKs")
+        bail!("PlaintextProvider does not wrap DEKs — configure a key provider")
     }
     async fn unwrap_dek(&self, _wrapped: &[u8]) -> Result<Vec<u8>> {
-        unreachable!("PlaintextProvider does not use DEKs")
+        bail!("PlaintextProvider does not unwrap DEKs — configure a key provider")
     }
 }
 
@@ -280,5 +280,90 @@ mod tests {
         let envelope = seal(&provider, b"").await.unwrap();
         let recovered = open(&provider, &envelope).await.unwrap().unwrap();
         assert!(recovered.is_empty());
+    }
+
+    // ── build_key_provider tests ──────────────────────────────────────────
+
+    fn test_config() -> GatewayConfig {
+        GatewayConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            storage: crate::config::StorageConfig::Redb {
+                path: "/dev/null".into(),
+            },
+            cdc: crate::config::CdcConfig {
+                nats_url: None,
+                kafka_brokers: None,
+            },
+            ui_dir: None,
+            kek: None,
+            kms_key_arn: None,
+            vault_addr: None,
+            vault_token: None,
+            vault_transit_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_provider_plaintext_fallback() {
+        let config = test_config();
+        let (_, encrypt_enabled) = build_key_provider(&config).await.unwrap();
+        assert!(!encrypt_enabled);
+    }
+
+    #[tokio::test]
+    async fn build_provider_local_kek() {
+        let mut config = test_config();
+        config.kek = Some("aa".repeat(32));
+        let (_, encrypt_enabled) = build_key_provider(&config).await.unwrap();
+        assert!(encrypt_enabled);
+    }
+
+    #[cfg(not(feature = "aws-kms"))]
+    #[tokio::test]
+    async fn build_provider_kms_without_feature() {
+        let mut config = test_config();
+        config.kms_key_arn = Some("arn:aws:kms:us-east-1:000:key/test".into());
+        let err = build_key_provider(&config)
+            .await
+            .err()
+            .expect("should fail")
+            .to_string();
+        assert!(
+            err.contains("aws-kms"),
+            "Error should mention aws-kms feature: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "vault"))]
+    #[tokio::test]
+    async fn build_provider_vault_without_feature() {
+        let mut config = test_config();
+        config.vault_addr = Some("http://127.0.0.1:8200".into());
+        let err = build_key_provider(&config)
+            .await
+            .err()
+            .expect("should fail")
+            .to_string();
+        assert!(
+            err.contains("vault"),
+            "Error should mention vault feature: {err}"
+        );
+    }
+
+    #[cfg(feature = "vault")]
+    #[tokio::test]
+    async fn build_provider_vault_addr_without_token() {
+        let mut config = test_config();
+        config.vault_addr = Some("http://127.0.0.1:8200".into());
+        // vault_token is None
+        let err = build_key_provider(&config)
+            .await
+            .err()
+            .expect("should fail")
+            .to_string();
+        assert!(
+            err.contains("PEAT_VAULT_TOKEN"),
+            "Error should mention missing PEAT_VAULT_TOKEN: {err}"
+        );
     }
 }

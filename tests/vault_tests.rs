@@ -451,6 +451,21 @@ async fn vault_cross_provider_failure() {
 }
 
 #[tokio::test]
+async fn local_to_vault_cross_provider_failure() {
+    let state = VaultState::new([0x55; 32], "test-token");
+    let (addr, _state) = start_mock_vault(state).await;
+
+    let local_provider = LocalKeyProvider::new([0x66; 32]);
+    let vault_provider = VaultTransitProvider::new(&addr, "test-token", "my-key").unwrap();
+
+    let plaintext = b"cross-provider reverse test";
+    let envelope = crypto::seal(&local_provider, plaintext).await.unwrap();
+
+    // Vault provider cannot open locally-wrapped envelope
+    assert!(crypto::open(&vault_provider, &envelope).await.is_err());
+}
+
+#[tokio::test]
 async fn vault_wrong_token() {
     let state = VaultState::new([0x44; 32], "real-token");
     let (addr, _state) = start_mock_vault(state).await;
