@@ -107,36 +107,59 @@ mod inner {
                     unauthorized("Missing bearer token (Authorization: Bearer <token>)")
                 })?;
 
-                // Find an enabled IdP for this org
-                let idps = mgr.list_idps(&org_id).await.map_err(bad_request)?;
-                let idp = idps.iter().find(|i| i.enabled).ok_or_else(|| {
-                    bad_request(anyhow::anyhow!(
-                        "No enabled identity provider configured for org '{}'",
-                        org_id
-                    ))
-                })?;
+                // Try enrollment token first (32-char hex = 16-byte token ID)
+                if bearer.len() == 32 && bearer.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if let Ok(token) = mgr
+                        .validate_and_consume_token(&org_id, &app_id, &bearer)
+                        .await
+                    {
+                        let decision = EnrollmentDecision::Approved {
+                            tier: MeshTier::Endpoint,
+                            permissions: 0,
+                        };
+                        let subject = format!("token:{}", token.token_id);
+                        (decision, "token".to_string(), subject)
+                    } else {
+                        // Token lookup failed — could be revoked, expired, etc.
+                        // Return unauthorized with a clear message
+                        return Err(unauthorized(
+                            "Enrollment token is invalid, revoked, or expired",
+                        ));
+                    }
+                } else {
+                    // Not an enrollment token — try OIDC introspection
 
-                // Introspect the token against the IdP
-                let claims = introspect_oidc_token(
-                    &idp.issuer_url,
-                    &idp.client_id,
-                    &idp.client_secret,
-                    &bearer,
-                )
-                .await
-                .map_err(|e| unauthorized(format!("Token validation failed: {e}")))?;
+                    // Find an enabled IdP for this org
+                    let idps = mgr.list_idps(&org_id).await.map_err(bad_request)?;
+                    let idp = idps.iter().find(|i| i.enabled).ok_or_else(|| {
+                        bad_request(anyhow::anyhow!(
+                            "No enabled identity provider configured for org '{}'",
+                            org_id
+                        ))
+                    })?;
 
-                let subject = claims
-                    .get("sub")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                    // Introspect the token against the IdP
+                    let claims = introspect_oidc_token(
+                        &idp.issuer_url,
+                        &idp.client_id,
+                        &idp.client_secret,
+                        &bearer,
+                    )
+                    .await
+                    .map_err(|e| unauthorized(format!("Token validation failed: {e}")))?;
 
-                // Evaluate policy rules
-                let rules = mgr.list_policy_rules(&org_id).await.map_err(bad_request)?;
-                let decision = evaluate_policy(&rules, &claims);
+                    let subject = claims
+                        .get("sub")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
 
-                (decision, idp.idp_id.clone(), subject)
+                    // Evaluate policy rules
+                    let rules = mgr.list_policy_rules(&org_id).await.map_err(bad_request)?;
+                    let decision = evaluate_policy(&rules, &claims);
+
+                    (decision, idp.idp_id.clone(), subject)
+                }
             }
             EnrollmentPolicy::Strict => unreachable!(),
         };

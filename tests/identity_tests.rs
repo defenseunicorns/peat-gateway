@@ -840,3 +840,264 @@ async fn encrypted_genesis_stored_bytes_are_not_plaintext() {
     let genesis = mgr.load_genesis("raw-org", "raw-app").await.unwrap();
     assert!(!genesis.mesh_id().is_empty());
 }
+
+// ── Enrollment Token Enforcement ─────────────────────────────
+
+#[tokio::test]
+async fn enroll_with_valid_token_succeeds() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    let token = mgr
+        .create_token("acme", "mesh-ctrl".into(), "test-token".into(), None, None)
+        .await
+        .unwrap();
+
+    let device = peat_mesh::security::DeviceKeypair::generate();
+    let pk_hex = hex::encode(device.public_key_bytes());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::from(
+            json!({
+                "public_key": pk_hex,
+                "node_id": "token-node-1"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["decision"]["Approved"]["tier"], "Endpoint");
+    assert!(body["certificate"].as_str().is_some());
+
+    // Audit should record token subject
+    let resp = app
+        .clone()
+        .oneshot(json_request("GET", "/orgs/acme/audit?limit=10", None))
+        .await
+        .unwrap();
+    let audit = body_json(resp).await;
+    let entries = audit.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["subject"], format!("token:{}", token.token_id));
+    assert_eq!(entries[0]["idp_id"], "token");
+}
+
+#[tokio::test]
+async fn enroll_with_token_increments_uses() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    let token = mgr
+        .create_token(
+            "acme",
+            "mesh-ctrl".into(),
+            "counter-token".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(token.uses, 0);
+
+    // Enroll twice
+    for _ in 0..2 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", token.token_id))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Verify uses counter
+    let updated = mgr.get_token("acme", &token.token_id).await.unwrap();
+    assert_eq!(updated.uses, 2);
+}
+
+#[tokio::test]
+async fn enroll_with_revoked_token_is_unauthorized() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    let token = mgr
+        .create_token("acme", "mesh-ctrl".into(), "revoke-me".into(), None, None)
+        .await
+        .unwrap();
+    mgr.revoke_token("acme", &token.token_id).await.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enroll_with_expired_token_is_unauthorized() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    // Create token that expired 1 hour ago
+    let one_hour_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 3_600_000;
+
+    let token = mgr
+        .create_token(
+            "acme",
+            "mesh-ctrl".into(),
+            "expired-token".into(),
+            None,
+            Some(one_hour_ago),
+        )
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enroll_with_exhausted_token_is_unauthorized() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    // Create token with max_uses=1
+    let token = mgr
+        .create_token("acme", "mesh-ctrl".into(), "one-shot".into(), Some(1), None)
+        .await
+        .unwrap();
+
+    // First enrollment succeeds
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Second enrollment fails — max_uses exhausted
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enroll_with_wrong_formation_token_is_unauthorized() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-a".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-b".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    // Token for mesh-a
+    let token = mgr
+        .create_token(
+            "acme",
+            "mesh-a".into(),
+            "wrong-formation".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Try enrolling in mesh-b with mesh-a's token
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-b/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.token_id))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn enroll_controlled_non_hex_bearer_falls_through_to_oidc() {
+    let (mgr, app, _dir) = setup().await;
+    mgr.create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    mgr.create_formation("acme", "mesh-ctrl".into(), EnrollmentPolicy::Controlled)
+        .await
+        .unwrap();
+
+    // Non-hex bearer → falls through to OIDC path → no IdP configured → 400
+    let req = Request::builder()
+        .method("POST")
+        .uri("/orgs/acme/formations/mesh-ctrl/enroll")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer not-a-hex-token-at-all")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    // No IdP configured → should get BAD_REQUEST from OIDC path
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
