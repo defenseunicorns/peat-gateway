@@ -51,6 +51,7 @@ hex = "0.4"
 # Envelope encryption
 aes-gcm = "0.10"
 zeroize = "1.8"
+base64 = { version = "0.22", optional = true }
 
 # CDC sinks (optional)
 async-nats = { version = "0.38", optional = true }
@@ -80,7 +81,7 @@ webhook = ["dep:reqwest"]
 oidc = ["dep:openidconnect"]
 postgres = ["dep:sqlx"]
 aws-kms = ["dep:aws-sdk-kms", "dep:aws-config"]
-vault = []
+vault = ["dep:reqwest", "dep:base64"]
 full = ["nats", "kafka", "webhook", "oidc", "postgres", "aws-kms", "vault"]
 
 [dev-dependencies]
@@ -91,4 +92,5 @@ async-nats = "0.38"
 futures = "0.3"
 peat-mesh = { version = "0.5", features = ["automerge-backend"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+base64 = "0.22"
 hex = "0.4"
