@@ -1,3 +1,4 @@
+#[cfg(feature = "loadtest")]
 mod cdc_test;
 mod enroll;
 mod formations;
@@ -14,7 +15,12 @@ use crate::cdc::CdcEngine;
 use crate::tenant::TenantManager;
 
 pub fn router(tenant_mgr: TenantManager, cdc_engine: CdcEngine, ui_dir: Option<&str>) -> Router {
-    let r = app(tenant_mgr.clone()).nest("/orgs", cdc_test::router(tenant_mgr, cdc_engine));
+    let r = app(tenant_mgr.clone());
+
+    #[cfg(feature = "loadtest")]
+    let r = r.nest("/orgs", cdc_test::router(tenant_mgr, cdc_engine));
+    #[cfg(not(feature = "loadtest"))]
+    let _ = (tenant_mgr, cdc_engine);
 
     if let Some(dir) = ui_dir {
         let index = format!("{}/index.html", dir);

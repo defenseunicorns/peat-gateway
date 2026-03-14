@@ -127,6 +127,30 @@ pub struct IdpConfig {
     pub created_at: u64,
 }
 
+/// API response representation of [`IdpConfig`] that excludes `client_secret`.
+#[derive(Debug, Clone, Serialize)]
+pub struct IdpConfigResponse {
+    pub idp_id: String,
+    pub org_id: String,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub enabled: bool,
+    pub created_at: u64,
+}
+
+impl From<IdpConfig> for IdpConfigResponse {
+    fn from(idp: IdpConfig) -> Self {
+        Self {
+            idp_id: idp.idp_id,
+            org_id: idp.org_id,
+            issuer_url: idp.issuer_url,
+            client_id: idp.client_id,
+            enabled: idp.enabled,
+            created_at: idp.created_at,
+        }
+    }
+}
+
 /// Mesh tier assigned to an enrolled peer based on identity claims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeshTier {

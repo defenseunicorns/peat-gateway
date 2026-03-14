@@ -622,11 +622,11 @@ impl TenantManager {
 
 // ── Input validation ────────────────────────────────────────────────────────
 
-const MAX_IDENTIFIER_LEN: usize = 256;
+const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 1024;
 
 /// Validate an identifier field (org_id, app_id, etc.):
-/// non-empty, no null bytes, within length limit.
+/// must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` and be at most 128 characters.
 fn validate_identifier(value: &str, field: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{field} must not be empty");
@@ -637,8 +637,15 @@ fn validate_identifier(value: &str, field: &str) -> Result<()> {
             value.len()
         );
     }
-    if value.contains('\0') {
-        bail!("{field} must not contain null bytes");
+    let bytes = value.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        bail!("{field} must start with an alphanumeric character");
+    }
+    if !bytes
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        bail!("{field} contains invalid characters (allowed: a-zA-Z0-9._-)");
     }
     Ok(())
 }
