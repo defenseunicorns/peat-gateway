@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::tenant::models::{IdpConfig, MeshTier, PolicyRule};
+use crate::tenant::models::{IdpConfigResponse, MeshTier, PolicyRule};
 use crate::tenant::TenantManager;
 
 type ApiError = (axum::http::StatusCode, String);
@@ -31,27 +31,30 @@ async fn create_idp(
     State(mgr): State<TenantManager>,
     Path(org_id): Path<String>,
     Json(req): Json<CreateIdpRequest>,
-) -> Result<(axum::http::StatusCode, Json<IdpConfig>), ApiError> {
+) -> Result<(axum::http::StatusCode, Json<IdpConfigResponse>), ApiError> {
     mgr.create_idp(&org_id, req.issuer_url, req.client_id, req.client_secret)
         .await
-        .map(|idp| (axum::http::StatusCode::CREATED, Json(idp)))
+        .map(|idp| (axum::http::StatusCode::CREATED, Json(idp.into())))
         .map_err(bad_request)
 }
 
 async fn list_idps(
     State(mgr): State<TenantManager>,
     Path(org_id): Path<String>,
-) -> Result<Json<Vec<IdpConfig>>, ApiError> {
-    mgr.list_idps(&org_id).await.map(Json).map_err(not_found)
+) -> Result<Json<Vec<IdpConfigResponse>>, ApiError> {
+    mgr.list_idps(&org_id)
+        .await
+        .map(|idps| Json(idps.into_iter().map(Into::into).collect()))
+        .map_err(not_found)
 }
 
 async fn get_idp(
     State(mgr): State<TenantManager>,
     Path((org_id, idp_id)): Path<(String, String)>,
-) -> Result<Json<IdpConfig>, ApiError> {
+) -> Result<Json<IdpConfigResponse>, ApiError> {
     mgr.get_idp(&org_id, &idp_id)
         .await
-        .map(Json)
+        .map(|idp| Json(idp.into()))
         .map_err(not_found)
 }
 
@@ -64,10 +67,10 @@ async fn toggle_idp(
     State(mgr): State<TenantManager>,
     Path((org_id, idp_id)): Path<(String, String)>,
     Json(req): Json<ToggleIdpRequest>,
-) -> Result<Json<IdpConfig>, ApiError> {
+) -> Result<Json<IdpConfigResponse>, ApiError> {
     mgr.toggle_idp(&org_id, &idp_id, req.enabled)
         .await
-        .map(Json)
+        .map(|idp| Json(idp.into()))
         .map_err(not_found)
 }
 
