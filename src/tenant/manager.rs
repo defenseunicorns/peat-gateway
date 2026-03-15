@@ -279,7 +279,7 @@ impl TenantManager {
             let mut buf = [0u8; 16];
             use rand_core::RngCore;
             rand_core::OsRng.fill_bytes(&mut buf);
-            hex::encode(buf)
+            format!("peat_{}", hex::encode(buf))
         };
 
         let now = std::time::SystemTime::now()

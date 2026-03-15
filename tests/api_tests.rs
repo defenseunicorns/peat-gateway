@@ -723,7 +723,8 @@ async fn create_and_get_enrollment_token() {
     assert_eq!(body["uses"], 0);
     assert_eq!(body["revoked"], false);
     let token_id = body["token_id"].as_str().unwrap().to_string();
-    assert_eq!(token_id.len(), 32); // 16 bytes hex
+    assert!(token_id.starts_with("peat_")); // prefix convention
+    assert_eq!(token_id.len(), 37); // "peat_" (5) + 32 hex chars
 
     // Get token
     let resp = client

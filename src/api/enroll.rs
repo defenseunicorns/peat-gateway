@@ -107,8 +107,8 @@ mod inner {
                     unauthorized("Missing bearer token (Authorization: Bearer <token>)")
                 })?;
 
-                // Try enrollment token first (32-char hex = 16-byte token ID)
-                if bearer.len() == 32 && bearer.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Try enrollment token first (prefixed with "peat_")
+                if bearer.starts_with("peat_") {
                     if let Ok(token) = mgr
                         .validate_and_consume_token(&org_id, &app_id, &bearer)
                         .await
