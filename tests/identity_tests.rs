@@ -1080,7 +1080,7 @@ async fn enroll_with_wrong_formation_token_is_unauthorized() {
 }
 
 #[tokio::test]
-async fn enroll_controlled_non_hex_bearer_falls_through_to_oidc() {
+async fn enroll_controlled_non_prefixed_bearer_falls_through_to_oidc() {
     let (mgr, app, _dir) = setup().await;
     mgr.create_org("acme".into(), "Acme Corp".into())
         .await
@@ -1089,12 +1089,12 @@ async fn enroll_controlled_non_hex_bearer_falls_through_to_oidc() {
         .await
         .unwrap();
 
-    // Non-hex bearer → falls through to OIDC path → no IdP configured → 400
+    // No peat_ prefix → falls through to OIDC path → no IdP configured → 400
     let req = Request::builder()
         .method("POST")
         .uri("/orgs/acme/formations/mesh-ctrl/enroll")
         .header("content-type", "application/json")
-        .header("authorization", "Bearer not-a-hex-token-at-all")
+        .header("authorization", "Bearer not-a-peat-token-at-all")
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();

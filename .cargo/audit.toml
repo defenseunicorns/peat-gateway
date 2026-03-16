@@ -1,0 +1,11 @@
+# Cargo audit configuration
+# https://github.com/rustsec/rustsec/tree/main/cargo-audit
+
+[advisories]
+# RUSTSEC-2023-0071: rsa crate Marvin Attack (timing sidechannel)
+# No patch available. Pulled in transitively by openidconnect and sqlx-mysql.
+# RSA is required by the OIDC spec (RS256 is mandatory).
+# Risk accepted: gateway does not use rsa directly for key operations;
+# the rsa crate is used internally by openidconnect for JWT verification
+# and by sqlx for MySQL auth (we use Postgres, so that path is dead code).
+ignore = ["RUSTSEC-2023-0071"]
