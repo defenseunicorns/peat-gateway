@@ -13,8 +13,9 @@ replicaCount: 1
 storage:
   backend: redb
   postgres:
-    # Connection string (ignored when backend=redb)
-    url: "postgres://peat:peat@postgres-rw.postgres.svc:5432/peat_gateway"
+    # Connection string (ignored when backend=redb).
+    # For production, use existingSecret instead of putting credentials here.
+    url: ""
     # Use existing secret for connection string (key: url)
     existingSecret: ""
 
