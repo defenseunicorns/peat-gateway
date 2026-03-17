@@ -68,18 +68,21 @@ const MAGIC: &[u8; 4] = b"PENV";
 const VERSION: u8 = 0x01;
 const FIXED_HEADER: usize = 4 + 1 + 2; // magic + version + wrapped_dek_len
 
+/// Fill a buffer with cryptographically-secure random bytes.
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut buf = [0u8; N];
+    rand_core::OsRng.fill_bytes(&mut buf);
+    buf
+}
+
 /// Encrypt `plaintext` using a fresh DEK, wrapping the DEK with `provider`.
 pub async fn seal(provider: &dyn KeyProvider, plaintext: &[u8]) -> Result<Vec<u8>> {
     use aes_gcm::aead::Aead;
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
-    // Generate random DEK
-    let mut dek = [0u8; 32];
-    rand_core::OsRng.fill_bytes(&mut dek);
-
-    // Generate data nonce
-    let mut data_nonce = [0u8; 12];
-    rand_core::OsRng.fill_bytes(&mut data_nonce);
+    // Generate random DEK and nonce
+    let mut dek = random_bytes::<32>();
+    let data_nonce = random_bytes::<12>();
 
     // Wrap DEK with provider (opaque blob — provider manages its own nonces)
     let wrapped_dek = provider.wrap_dek(&dek).await?;
