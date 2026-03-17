@@ -1,12 +1,12 @@
 # peat-gateway
 
-Enterprise control plane for the [PEAT](https://github.com/defenseunicorns/peat) mesh protocol — multi-org tenancy, change data capture, identity federation, and operational management.
+Manages the organizational side of [Peat](https://github.com/defenseunicorns/peat) mesh networks — onboarding diverse teams, federating identity systems, and streaming mesh events to enterprise tooling.
 
 ## Overview
 
-PEAT mesh nodes are purpose-built for the tactical edge: single-formation, single-authority, designed to operate under DDIL (Denied, Degraded, Intermittent, Limited) conditions. peat-gateway sits above the mesh layer and provides the enterprise capabilities needed to manage mesh networks at organizational scale.
+Peat meshes are decentralized and autonomous by design. But organizations deploying them need to onboard new formations, integrate with their identity providers (Keycloak, Okta, Azure AD, CAC/SAML), route mesh events to analytics pipelines, and manage it all across multiple teams with isolated trust boundaries.
 
-The core problem: as PEAT deployments grow from a single squad mesh to dozens of formations across multiple organizations, operators need centralized visibility, event pipelines, and identity integration — without compromising the mesh's decentralized, partition-tolerant design.
+peat-gateway bridges the gap between autonomous tactical meshes and enterprise operations — without sitting in the data path or compromising the mesh's partition-tolerant design.
 
 ### What peat-gateway provides
 
