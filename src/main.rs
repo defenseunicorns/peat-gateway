@@ -77,9 +77,18 @@ async fn serve(config: &config::GatewayConfig) -> Result<()> {
         "Starting peat-gateway"
     );
 
+    if config.admin_token.is_none() {
+        tracing::warn!("PEAT_ADMIN_TOKEN is not set — admin API is unauthenticated (dev mode)");
+    }
+
     let tenant_mgr = tenant::TenantManager::new(config).await?;
     let cdc_engine = cdc::CdcEngine::new(config, tenant_mgr.clone()).await?;
-    let app = api::router(tenant_mgr, cdc_engine, config.ui_dir.as_deref());
+    let app = api::router(
+        tenant_mgr,
+        cdc_engine,
+        config.ui_dir.as_deref(),
+        config.admin_token.clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     info!("Listening on {}", config.bind_addr);

@@ -17,6 +17,9 @@ pub struct GatewayConfig {
     pub kek: Option<String>,
     /// AWS KMS key ARN for DEK wrapping (requires `aws-kms` feature).
     pub kms_key_arn: Option<String>,
+    /// Admin API bearer token. When set, all admin endpoints require
+    /// `Authorization: Bearer <token>`. When absent, admin API is open (dev mode).
+    pub admin_token: Option<String>,
     /// HashiCorp Vault server address (requires `vault` feature).
     pub vault_addr: Option<String>,
     /// Vault authentication token.
@@ -66,6 +69,7 @@ impl GatewayConfig {
                 kafka_brokers: env::var("PEAT_CDC_KAFKA_BROKERS").ok(),
             },
             ui_dir: env::var("PEAT_UI_DIR").ok(),
+            admin_token: env::var("PEAT_ADMIN_TOKEN").ok(),
             kek: env::var("PEAT_KEK").ok(),
             kms_key_arn: env::var("PEAT_KMS_KEY_ARN").ok(),
             vault_addr: env::var("PEAT_VAULT_ADDR").ok(),

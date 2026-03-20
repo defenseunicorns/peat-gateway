@@ -1,3 +1,4 @@
+mod auth;
 #[cfg(feature = "loadtest")]
 mod cdc_test;
 mod enroll;
@@ -31,8 +32,13 @@ pub fn install_prometheus_recorder() -> PrometheusHandle {
         .clone()
 }
 
-pub fn router(tenant_mgr: TenantManager, cdc_engine: CdcEngine, ui_dir: Option<&str>) -> Router {
-    let r = app(tenant_mgr.clone());
+pub fn router(
+    tenant_mgr: TenantManager,
+    cdc_engine: CdcEngine,
+    ui_dir: Option<&str>,
+    admin_token: Option<String>,
+) -> Router {
+    let r = app_authenticated(tenant_mgr.clone(), admin_token);
 
     #[cfg(feature = "loadtest")]
     let r = r.nest("/orgs", cdc_test::router(tenant_mgr, cdc_engine));
@@ -50,21 +56,38 @@ pub fn router(tenant_mgr: TenantManager, cdc_engine: CdcEngine, ui_dir: Option<&
     }
 }
 
-/// Build the application router. Separated from `router()` so integration tests
-/// can construct it without a CdcEngine.
+/// Build the application router without admin auth (dev/test convenience).
 pub fn app(tenant_mgr: TenantManager) -> Router {
+    app_authenticated(tenant_mgr, None)
+}
+
+/// Build the application router with optional admin token enforcement.
+pub fn app_authenticated(tenant_mgr: TenantManager, admin_token: Option<String>) -> Router {
     let prometheus_handle = install_prometheus_recorder();
-    app_with_metrics(tenant_mgr, prometheus_handle)
+    app_with_metrics(tenant_mgr, prometheus_handle, admin_token)
 }
 
 /// Build the application router with an explicit PrometheusHandle.
-pub fn app_with_metrics(tenant_mgr: TenantManager, prometheus_handle: PrometheusHandle) -> Router {
-    Router::new()
+pub fn app_with_metrics(
+    tenant_mgr: TenantManager,
+    prometheus_handle: PrometheusHandle,
+    admin_token: Option<String>,
+) -> Router {
+    // Admin routes — protected by bearer token when PEAT_ADMIN_TOKEN is set
+    let admin_routes = Router::new()
         .nest("/orgs", orgs::router(tenant_mgr.clone()))
         .nest("/orgs", tokens::router(tenant_mgr.clone()))
         .nest("/orgs", sinks::router(tenant_mgr.clone()))
         .nest("/orgs", identity::router(tenant_mgr.clone()))
-        .nest("/orgs", enroll::router(tenant_mgr.clone()))
-        .nest("/orgs", formations::router(tenant_mgr))
+        .nest("/orgs", formations::router(tenant_mgr.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            admin_token,
+            auth::require_admin_token,
+        ));
+
+    // Public routes — no auth required
+    Router::new()
+        .merge(admin_routes)
+        .nest("/orgs", enroll::router(tenant_mgr))
         .merge(health::router(prometheus_handle))
 }

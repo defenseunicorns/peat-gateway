@@ -18,6 +18,7 @@ fn base_config(db_path: &std::path::Path) -> GatewayConfig {
             kafka_brokers: None,
         },
         ui_dir: None,
+        admin_token: None,
         kek: None,
         kms_key_arn: None,
         vault_addr: None,
@@ -130,6 +131,7 @@ async fn migrate_skips_already_encrypted_records() {
             kafka_brokers: None,
         },
         ui_dir: None,
+        admin_token: None,
         kek: Some(kek_hex.clone()),
         kms_key_arn: None,
         vault_addr: None,
@@ -191,6 +193,7 @@ async fn migrate_mixed_plaintext_and_encrypted() {
     // Create another formation with encryption
     {
         let config = GatewayConfig {
+            admin_token: None,
             kek: Some(kek_hex.clone()),
             ..base_config(&db_path)
         };
@@ -221,6 +224,7 @@ async fn migrate_mixed_plaintext_and_encrypted() {
 
     // Run migration
     let config_with_kek = GatewayConfig {
+        admin_token: None,
         kek: Some(kek_hex.clone()),
         ..base_config(&db_path)
     };
@@ -287,6 +291,7 @@ async fn migrate_dry_run_does_not_modify_records() {
 
     // Run dry-run migration
     let config_with_kek = GatewayConfig {
+        admin_token: None,
         kek: Some("aa".repeat(32)),
         ..base_config(&db_path)
     };
@@ -335,6 +340,7 @@ async fn migrate_no_formations_succeeds() {
     }
 
     let config = GatewayConfig {
+        admin_token: None,
         kek: Some("ff".repeat(32)),
         ..base_config(&db_path)
     };

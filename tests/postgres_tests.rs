@@ -88,6 +88,7 @@ fn make_config(url: &str, kek: Option<&str>) -> GatewayConfig {
             kafka_brokers: None,
         },
         ui_dir: None,
+        admin_token: None,
         kek: kek.map(String::from),
         kms_key_arn: None,
         vault_addr: None,

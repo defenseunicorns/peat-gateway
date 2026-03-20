@@ -56,6 +56,7 @@ async fn setup() -> (TenantManager, CdcEngine, tempfile::TempDir) {
             kafka_brokers: None,
         },
         ui_dir: None,
+        admin_token: None,
         kek: None,
         kms_key_arn: None,
         vault_addr: None,

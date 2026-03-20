@@ -136,6 +136,7 @@ peat-gateway
 |----------|---------|-------------|
 | `PEAT_GATEWAY_BIND` | `0.0.0.0:8080` | API server bind address |
 | `PEAT_GATEWAY_DATA_DIR` | `./data` | Persistent state directory |
+| `PEAT_ADMIN_TOKEN` | — | Bearer token for admin API authentication. When set, all admin endpoints require `Authorization: Bearer <token>`. When unset, admin API is open (dev mode). |
 | `PEAT_KEK` | — | Hex-encoded 256-bit key encryption key. Enables local envelope encryption for genesis key material. When unset (and no KMS/Vault configured), genesis is stored as plaintext (dev/test only). |
 | `PEAT_KMS_KEY_ARN` | — | AWS KMS key ARN for envelope encryption (requires `aws-kms` feature). Takes priority over `PEAT_KEK`. |
 | `PEAT_VAULT_ADDR` | — | HashiCorp Vault server address for Transit envelope encryption (requires `vault` feature). |

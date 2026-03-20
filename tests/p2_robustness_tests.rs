@@ -29,6 +29,7 @@ fn test_config(dir: &tempfile::TempDir, kek: Option<String>) -> GatewayConfig {
             kafka_brokers: None,
         },
         ui_dir: None,
+        admin_token: None,
         kek,
         kms_key_arn: None,
         vault_addr: None,
