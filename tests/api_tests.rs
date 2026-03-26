@@ -1125,7 +1125,7 @@ async fn list_documents_returns_empty() {
 }
 
 #[tokio::test]
-async fn list_certificates_returns_empty() {
+async fn list_certificates_returns_root_cert() {
     let (client, base, _dir) = spawn_app().await;
     setup_org_and_formation(&client, &base).await;
 
@@ -1138,5 +1138,8 @@ async fn list_certificates_returns_empty() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Vec<Value> = resp.json().await.unwrap();
-    assert!(body.is_empty());
+    // Should contain at least the root authority certificate
+    assert!(!body.is_empty());
+    assert_eq!(body[0]["peer_id"], "authority-0");
+    assert!(!body[0]["fingerprint"].as_str().unwrap().is_empty());
 }
