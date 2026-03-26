@@ -2,7 +2,7 @@ mod auth;
 #[cfg(feature = "loadtest")]
 mod cdc_test;
 mod enroll;
-mod formations;
+pub mod formations;
 mod health;
 mod identity;
 mod orgs;
