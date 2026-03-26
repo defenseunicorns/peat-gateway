@@ -705,3 +705,1251 @@ fn validate_issuer_url(url: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::PlaintextProvider;
+    use crate::storage::redb_backend::RedbBackend;
+    use crate::tenant::models::{
+        EnrollmentAuditEntry, EnrollmentDecision, EnrollmentPolicy, MeshTier, OrgQuotas,
+    };
+    use std::sync::Arc;
+
+    /// Build a TenantManager backed by a temp redb database with encryption disabled.
+    fn make_manager(dir: &tempfile::TempDir) -> TenantManager {
+        let path = dir.path().join("test.redb");
+        let backend = RedbBackend::open(path.to_str().unwrap()).unwrap();
+        let store: Arc<dyn StorageBackend> = Arc::new(backend);
+        let key_provider: Arc<dyn KeyProvider> = Arc::new(PlaintextProvider);
+        TenantManager::with_backend(store, key_provider, false)
+    }
+
+    // ── Organization CRUD ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let org = mgr
+            .create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        assert_eq!(org.org_id, "acme");
+        assert_eq!(org.display_name, "Acme Corp");
+        assert!(org.created_at > 0);
+
+        // Verify it can be retrieved
+        let fetched = mgr.get_org("acme").await.unwrap();
+        assert_eq!(fetched.org_id, "acme");
+    }
+
+    #[tokio::test]
+    async fn test_create_duplicate_org_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        let err = mgr
+            .create_org("acme".into(), "Acme Again".into())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "Expected 'already exists' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_org_invalid_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        // Empty org_id
+        assert!(mgr.create_org("".into(), "Name".into()).await.is_err());
+
+        // Starts with non-alphanumeric
+        assert!(mgr.create_org("-bad".into(), "Name".into()).await.is_err());
+
+        // Contains invalid characters
+        assert!(mgr
+            .create_org("has spaces".into(), "Name".into())
+            .await
+            .is_err());
+
+        // Empty display name
+        assert!(mgr.create_org("good-id".into(), "".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_org_id_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let long_id = "a".repeat(MAX_IDENTIFIER_LEN + 1);
+        let err = mgr.create_org(long_id, "Name".into()).await.unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum length"));
+    }
+
+    #[tokio::test]
+    async fn test_list_orgs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        assert!(mgr.list_orgs().await.unwrap().is_empty());
+
+        mgr.create_org("alpha".into(), "Alpha".into())
+            .await
+            .unwrap();
+        mgr.create_org("beta".into(), "Beta".into()).await.unwrap();
+
+        let orgs = mgr.list_orgs().await.unwrap();
+        assert_eq!(orgs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let updated = mgr
+            .update_org("acme", Some("New Name".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.display_name, "New Name");
+
+        let custom_quotas = OrgQuotas {
+            max_formations: 50,
+            ..OrgQuotas::default()
+        };
+        let updated = mgr
+            .update_org("acme", None, Some(custom_quotas))
+            .await
+            .unwrap();
+        assert_eq!(updated.quotas.max_formations, 50);
+        assert_eq!(updated.display_name, "New Name");
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_org_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr
+            .update_org("ghost", Some("Name".into()), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.delete_org("acme").await.unwrap();
+
+        assert!(mgr.get_org("acme").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_org_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.delete_org("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_org_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.get_org("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    // ── Formations ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_formation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        let formation = mgr
+            .create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        assert_eq!(formation.app_id, "logistics");
+        assert!(!formation.mesh_id.is_empty());
+
+        // Verify it can be retrieved
+        let fetched = mgr.get_formation("acme", "logistics").await.unwrap();
+        assert_eq!(fetched.app_id, "logistics");
+        assert_eq!(fetched.mesh_id, formation.mesh_id);
+    }
+
+    #[tokio::test]
+    async fn test_create_duplicate_formation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let err = mgr
+            .create_formation("acme", "logistics".into(), EnrollmentPolicy::Strict)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_formation_requires_valid_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr
+            .create_formation("ghost", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_formation_invalid_app_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        // Empty app_id
+        assert!(mgr
+            .create_formation("acme", "".into(), EnrollmentPolicy::Open)
+            .await
+            .is_err());
+
+        // Invalid characters
+        assert!(mgr
+            .create_formation("acme", "has spaces".into(), EnrollmentPolicy::Open)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_formations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        assert!(mgr.list_formations("acme").await.unwrap().is_empty());
+
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app2".into(), EnrollmentPolicy::Controlled)
+            .await
+            .unwrap();
+
+        assert_eq!(mgr.list_formations("acme").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_formations_requires_valid_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.list_formations("ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_formation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        mgr.delete_formation("acme", "logistics").await.unwrap();
+        assert!(mgr.get_formation("acme", "logistics").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_formation_cleans_up_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        // Genesis should exist after creation
+        let genesis = mgr.load_genesis("acme", "logistics").await;
+        assert!(genesis.is_ok());
+
+        mgr.delete_formation("acme", "logistics").await.unwrap();
+
+        // Genesis should be gone
+        let err = mgr.load_genesis("acme", "logistics").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_formation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.delete_formation("acme", "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_org_cascades_formations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app2".into(), EnrollmentPolicy::Controlled)
+            .await
+            .unwrap();
+
+        mgr.delete_org("acme").await.unwrap();
+
+        // Re-create org to test list_formations (it requires org to exist)
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        assert!(mgr.list_formations("acme").await.unwrap().is_empty());
+    }
+
+    // ── Enrollment Tokens ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_enrollment_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Controlled)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Test Token".into(), Some(10), None)
+            .await
+            .unwrap();
+
+        assert!(token.token_id.starts_with("peat_"));
+        assert_eq!(token.org_id, "acme");
+        assert_eq!(token.app_id, "app1");
+        assert_eq!(token.label, "Test Token");
+        assert_eq!(token.max_uses, Some(10));
+        assert_eq!(token.uses, 0);
+        assert!(!token.revoked);
+    }
+
+    #[tokio::test]
+    async fn test_create_token_requires_org_and_formation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        // No org
+        assert!(mgr
+            .create_token("ghost", "app1".into(), "Label".into(), None, None)
+            .await
+            .is_err());
+
+        // Org exists but no formation
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        assert!(mgr
+            .create_token("acme", "ghost-app".into(), "Label".into(), None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_token_empty_label_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let err = mgr
+            .create_token("acme", "app1".into(), "".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_list_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        mgr.create_token("acme", "app1".into(), "Token A".into(), None, None)
+            .await
+            .unwrap();
+        mgr.create_token("acme", "app1".into(), "Token B".into(), None, None)
+            .await
+            .unwrap();
+
+        let tokens = mgr.list_tokens("acme", "app1").await.unwrap();
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Tok".into(), None, None)
+            .await
+            .unwrap();
+
+        let revoked = mgr.revoke_token("acme", &token.token_id).await.unwrap();
+        assert!(revoked.revoked);
+
+        // Revoking again should fail
+        let err = mgr.revoke_token("acme", &token.token_id).await.unwrap_err();
+        assert!(err.to_string().contains("already revoked"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Tok".into(), None, None)
+            .await
+            .unwrap();
+
+        mgr.delete_token("acme", &token.token_id).await.unwrap();
+
+        // Getting deleted token should fail
+        let err = mgr.get_token("acme", &token.token_id).await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_token_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.delete_token("acme", "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_consume_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Tok".into(), Some(2), None)
+            .await
+            .unwrap();
+
+        // First use
+        let consumed = mgr
+            .validate_and_consume_token("acme", "app1", &token.token_id)
+            .await
+            .unwrap();
+        assert_eq!(consumed.uses, 1);
+
+        // Second use
+        let consumed = mgr
+            .validate_and_consume_token("acme", "app1", &token.token_id)
+            .await
+            .unwrap();
+        assert_eq!(consumed.uses, 2);
+
+        // Third use should fail (max_uses = 2)
+        let err = mgr
+            .validate_and_consume_token("acme", "app1", &token.token_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("maximum uses"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_token_wrong_formation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app2".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Tok".into(), None, None)
+            .await
+            .unwrap();
+
+        // Use with wrong app_id
+        let err = mgr
+            .validate_and_consume_token("acme", "app2", &token.token_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not belong to formation"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_revoked_token_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Tok".into(), None, None)
+            .await
+            .unwrap();
+        mgr.revoke_token("acme", &token.token_id).await.unwrap();
+
+        let err = mgr
+            .validate_and_consume_token("acme", "app1", &token.token_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("revoked"));
+    }
+
+    #[tokio::test]
+    async fn test_token_expiration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        // Create a token that expired 1 second ago
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let token = mgr
+            .create_token(
+                "acme",
+                "app1".into(),
+                "Expired".into(),
+                None,
+                Some(now_ms.saturating_sub(1000)),
+            )
+            .await
+            .unwrap();
+
+        let err = mgr
+            .validate_and_consume_token("acme", "app1", &token.token_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn test_token_unlimited_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let token = mgr
+            .create_token("acme", "app1".into(), "Unlimited".into(), None, None)
+            .await
+            .unwrap();
+
+        // Should succeed many times with no max_uses
+        for i in 1..=5 {
+            let consumed = mgr
+                .validate_and_consume_token("acme", "app1", &token.token_id)
+                .await
+                .unwrap();
+            assert_eq!(consumed.uses, i);
+        }
+    }
+
+    // ── Policy Rules ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_policy_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let rule = mgr
+            .create_policy_rule(
+                "acme",
+                "role".into(),
+                "admin".into(),
+                MeshTier::Authority,
+                0x0F,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert!(!rule.rule_id.is_empty());
+        assert_eq!(rule.org_id, "acme");
+        assert_eq!(rule.claim_key, "role");
+        assert_eq!(rule.claim_value, "admin");
+        assert_eq!(rule.tier, MeshTier::Authority);
+        assert_eq!(rule.permissions, 0x0F);
+        assert_eq!(rule.priority, 10);
+    }
+
+    #[tokio::test]
+    async fn test_create_policy_rule_requires_org() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr
+            .create_policy_rule(
+                "ghost",
+                "role".into(),
+                "admin".into(),
+                MeshTier::Authority,
+                0x0F,
+                10,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_list_policy_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        mgr.create_policy_rule(
+            "acme",
+            "role".into(),
+            "admin".into(),
+            MeshTier::Authority,
+            0x0F,
+            10,
+        )
+        .await
+        .unwrap();
+
+        mgr.create_policy_rule(
+            "acme",
+            "role".into(),
+            "viewer".into(),
+            MeshTier::Endpoint,
+            0x01,
+            20,
+        )
+        .await
+        .unwrap();
+
+        let rules = mgr.list_policy_rules("acme").await.unwrap();
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_policy_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let rule = mgr
+            .create_policy_rule(
+                "acme",
+                "role".into(),
+                "admin".into(),
+                MeshTier::Authority,
+                0x0F,
+                10,
+            )
+            .await
+            .unwrap();
+
+        mgr.delete_policy_rule("acme", &rule.rule_id).await.unwrap();
+
+        let rules = mgr.list_policy_rules("acme").await.unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_policy_rule_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.delete_policy_rule("acme", "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    // ── Quota Enforcement ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_formation_quota_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        // Set quota to 2 formations
+        let quotas = OrgQuotas {
+            max_formations: 2,
+            ..OrgQuotas::default()
+        };
+        mgr.update_org("acme", None, Some(quotas)).await.unwrap();
+
+        mgr.create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+        mgr.create_formation("acme", "app2".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        // Third formation should be rejected
+        let err = mgr
+            .create_formation("acme", "app3".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("quota"));
+    }
+
+    #[tokio::test]
+    async fn test_cdc_sink_quota_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        // Set quota to 1 sink
+        let quotas = OrgQuotas {
+            max_cdc_sinks: 1,
+            ..OrgQuotas::default()
+        };
+        mgr.update_org("acme", None, Some(quotas)).await.unwrap();
+
+        mgr.create_sink(
+            "acme",
+            CdcSinkType::Webhook {
+                url: "https://example.com/hook".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Webhook {
+                    url: "https://example.com/hook2".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("quota"));
+    }
+
+    // ── Genesis / Load ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_genesis_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+        let formation = mgr
+            .create_formation("acme", "app1".into(), EnrollmentPolicy::Open)
+            .await
+            .unwrap();
+
+        let genesis = mgr.load_genesis("acme", "app1").await.unwrap();
+        assert_eq!(genesis.mesh_id(), formation.mesh_id);
+    }
+
+    #[tokio::test]
+    async fn test_load_genesis_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        let err = mgr.load_genesis("acme", "ghost").await.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    // ── CDC Sinks ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_and_list_sinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let sink = mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Webhook {
+                    url: "https://example.com/hook".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(sink.enabled);
+        assert_eq!(sink.org_id, "acme");
+
+        let sinks = mgr.list_sinks("acme").await.unwrap();
+        assert_eq!(sinks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let sink = mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Nats {
+                    subject_prefix: "peat.cdc".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let toggled = mgr.toggle_sink("acme", &sink.sink_id, false).await.unwrap();
+        assert!(!toggled.enabled);
+
+        let toggled = mgr.toggle_sink("acme", &sink.sink_id, true).await.unwrap();
+        assert!(toggled.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_delete_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let sink = mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Kafka {
+                    topic: "peat-events".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        mgr.delete_sink("acme", &sink.sink_id).await.unwrap();
+        assert!(mgr.get_sink("acme", &sink.sink_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_sink_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        // Webhook with empty URL
+        assert!(mgr
+            .create_sink("acme", CdcSinkType::Webhook { url: "".into() })
+            .await
+            .is_err());
+
+        // Webhook with non-HTTP URL
+        assert!(mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Webhook {
+                    url: "ftp://example.com".into()
+                }
+            )
+            .await
+            .is_err());
+
+        // Nats with empty subject prefix
+        assert!(mgr
+            .create_sink(
+                "acme",
+                CdcSinkType::Nats {
+                    subject_prefix: "".into()
+                }
+            )
+            .await
+            .is_err());
+
+        // Kafka with empty topic
+        assert!(mgr
+            .create_sink("acme", CdcSinkType::Kafka { topic: "".into() })
+            .await
+            .is_err());
+    }
+
+    // ── IdP Configs ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_and_list_idps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let idp = mgr
+            .create_idp(
+                "acme",
+                "https://auth.example.com".into(),
+                "client-id".into(),
+                "client-secret".into(),
+            )
+            .await
+            .unwrap();
+
+        assert!(idp.enabled);
+        assert_eq!(idp.issuer_url, "https://auth.example.com");
+
+        let idps = mgr.list_idps("acme").await.unwrap();
+        assert_eq!(idps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_idp_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        // HTTP issuer (not HTTPS)
+        assert!(mgr
+            .create_idp(
+                "acme",
+                "http://auth.example.com".into(),
+                "id".into(),
+                "secret".into()
+            )
+            .await
+            .is_err());
+
+        // Empty issuer
+        assert!(mgr
+            .create_idp("acme", "".into(), "id".into(), "secret".into())
+            .await
+            .is_err());
+
+        // Empty client_id
+        assert!(mgr
+            .create_idp(
+                "acme",
+                "https://auth.example.com".into(),
+                "".into(),
+                "secret".into()
+            )
+            .await
+            .is_err());
+
+        // Empty client_secret
+        assert!(mgr
+            .create_idp(
+                "acme",
+                "https://auth.example.com".into(),
+                "id".into(),
+                "".into()
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_toggle_idp() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let idp = mgr
+            .create_idp(
+                "acme",
+                "https://auth.example.com".into(),
+                "id".into(),
+                "secret".into(),
+            )
+            .await
+            .unwrap();
+
+        let toggled = mgr.toggle_idp("acme", &idp.idp_id, false).await.unwrap();
+        assert!(!toggled.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_delete_idp() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let idp = mgr
+            .create_idp(
+                "acme",
+                "https://auth.example.com".into(),
+                "id".into(),
+                "secret".into(),
+            )
+            .await
+            .unwrap();
+
+        mgr.delete_idp("acme", &idp.idp_id).await.unwrap();
+        assert!(mgr.get_idp("acme", &idp.idp_id).await.is_err());
+    }
+
+    // ── Audit Log ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_audit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let entry = EnrollmentAuditEntry {
+            audit_id: "audit-1".into(),
+            org_id: "acme".into(),
+            app_id: "app1".into(),
+            idp_id: "idp-1".into(),
+            subject: "user@example.com".into(),
+            decision: EnrollmentDecision::Approved {
+                tier: MeshTier::Endpoint,
+                permissions: 0x01,
+            },
+            timestamp_ms: 1000,
+        };
+        mgr.append_audit(&entry).await.unwrap();
+
+        let entries = mgr.list_audit("acme", None, 100).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].audit_id, "audit-1");
+
+        // Filter by app_id
+        let entries = mgr.list_audit("acme", Some("app1"), 100).await.unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let entries = mgr
+            .list_audit("acme", Some("other-app"), 100)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_count_recent_enrollments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        for i in 0..5 {
+            let entry = EnrollmentAuditEntry {
+                audit_id: format!("audit-{i}"),
+                org_id: "acme".into(),
+                app_id: "app1".into(),
+                idp_id: "idp-1".into(),
+                subject: format!("user{i}@example.com"),
+                decision: EnrollmentDecision::Approved {
+                    tier: MeshTier::Endpoint,
+                    permissions: 0x01,
+                },
+                timestamp_ms: 1000 + i * 100,
+            };
+            mgr.append_audit(&entry).await.unwrap();
+        }
+
+        // All entries since timestamp 1000
+        let count = mgr.count_recent_enrollments("acme", 1000).await.unwrap();
+        assert_eq!(count, 5);
+
+        // Only entries since timestamp 1300
+        let count = mgr.count_recent_enrollments("acme", 1300).await.unwrap();
+        assert_eq!(count, 2); // timestamps 1300 and 1400
+    }
+
+    // ── Input Validation Helpers ────────────────────────────────────────
+
+    #[test]
+    fn test_validate_identifier() {
+        // Valid identifiers
+        assert!(validate_identifier("acme", "test").is_ok());
+        assert!(validate_identifier("my-org.v2", "test").is_ok());
+        assert!(validate_identifier("A_123", "test").is_ok());
+
+        // Invalid identifiers
+        assert!(validate_identifier("", "test").is_err());
+        assert!(validate_identifier("-bad", "test").is_err());
+        assert!(validate_identifier(".bad", "test").is_err());
+        assert!(validate_identifier("has space", "test").is_err());
+        assert!(validate_identifier("bad/slash", "test").is_err());
+
+        // Length limit
+        let max = "a".repeat(MAX_IDENTIFIER_LEN);
+        assert!(validate_identifier(&max, "test").is_ok());
+        let over = "a".repeat(MAX_IDENTIFIER_LEN + 1);
+        assert!(validate_identifier(&over, "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_display_name() {
+        assert!(validate_display_name("Acme Corp").is_ok());
+        assert!(validate_display_name("").is_err());
+
+        let long = "a".repeat(MAX_DISPLAY_NAME_LEN + 1);
+        assert!(validate_display_name(&long).is_err());
+    }
+
+    #[test]
+    fn test_validate_non_empty() {
+        assert!(validate_non_empty("hello", "field").is_ok());
+        assert!(validate_non_empty("", "field").is_err());
+        assert!(validate_non_empty("   ", "field").is_err());
+    }
+
+    #[test]
+    fn test_validate_http_url() {
+        assert!(validate_http_url("https://example.com", "url").is_ok());
+        assert!(validate_http_url("http://example.com", "url").is_ok());
+        assert!(validate_http_url("ftp://example.com", "url").is_err());
+        assert!(validate_http_url("", "url").is_err());
+    }
+
+    #[test]
+    fn test_validate_issuer_url() {
+        assert!(validate_issuer_url("https://auth.example.com").is_ok());
+        assert!(validate_issuer_url("http://auth.example.com").is_err());
+        assert!(validate_issuer_url("").is_err());
+    }
+}

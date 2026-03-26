@@ -1,5 +1,5 @@
 mod postgres;
-mod redb_backend;
+pub(crate) mod redb_backend;
 
 use anyhow::Result;
 use async_trait::async_trait;
