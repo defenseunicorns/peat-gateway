@@ -50,8 +50,7 @@ async fn discovery_handler(State(state): State<OidcMockState>) -> axum::Json<Val
     });
 
     if state.introspection_response.is_some() {
-        doc["introspection_endpoint"] =
-            Value::String(format!("{}/token/introspect", state.issuer));
+        doc["introspection_endpoint"] = Value::String(format!("{}/token/introspect", state.issuer));
     }
 
     axum::Json(doc)
@@ -142,8 +141,7 @@ async fn spawn_mock_oidc_full(
     let state = OidcMockState {
         issuer: issuer.clone(),
         userinfo_response: Arc::new((userinfo_status, userinfo_body.to_string())),
-        introspection_response: introspection
-            .map(|(s, b)| Arc::new((s, b.to_string()))),
+        introspection_response: introspection.map(|(s, b)| Arc::new((s, b.to_string()))),
         expected_client_id: "peat-gateway".to_string(),
         expected_client_secret: "test-secret".to_string(),
     };
@@ -368,8 +366,7 @@ async fn oidc_userinfo_invalid_json_returns_unauthorized() {
 async fn oidc_introspection_active_token_succeeds() {
     let introspection_body =
         json!({"active": true, "sub": "introspect-user-1", "scope": "openid email"}).to_string();
-    let issuer =
-        spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
+    let issuer = spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
     let (_mgr, app, _store, _dir) = setup_with_mock_idp(&issuer).await;
 
     let req = bearer_request(
@@ -404,8 +401,7 @@ async fn oidc_introspection_active_token_succeeds() {
 #[tokio::test]
 async fn oidc_introspection_inactive_token_returns_unauthorized() {
     let introspection_body = json!({"active": false}).to_string();
-    let issuer =
-        spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
+    let issuer = spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
     let (_mgr, app, _store, _dir) = setup_with_mock_idp(&issuer).await;
 
     let req = bearer_request(
@@ -421,8 +417,7 @@ async fn oidc_introspection_inactive_token_returns_unauthorized() {
 async fn oidc_introspection_applies_policy_rules() {
     let introspection_body =
         json!({"active": true, "sub": "admin-user", "role": "admin"}).to_string();
-    let issuer =
-        spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
+    let issuer = spawn_mock_oidc_full(200, "{}", Some((200, &introspection_body))).await;
     let (mgr, app, _store, _dir) = setup_with_mock_idp(&issuer).await;
 
     mgr.create_policy_rule(
@@ -452,15 +447,10 @@ async fn oidc_introspection_applies_policy_rules() {
 #[tokio::test]
 async fn oidc_introspection_endpoint_error_returns_unauthorized() {
     // Introspection endpoint returns 500
-    let issuer =
-        spawn_mock_oidc_full(200, "{}", Some((500, "Internal Server Error"))).await;
+    let issuer = spawn_mock_oidc_full(200, "{}", Some((500, "Internal Server Error"))).await;
     let (_mgr, app, _store, _dir) = setup_with_mock_idp(&issuer).await;
 
-    let req = bearer_request(
-        "/orgs/acme/formations/mesh-ctrl/enroll",
-        "some-token",
-        None,
-    );
+    let req = bearer_request("/orgs/acme/formations/mesh-ctrl/enroll", "some-token", None);
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
