@@ -8,4 +8,22 @@
 # Risk accepted: gateway does not use rsa directly for key operations;
 # the rsa crate is used internally by openidconnect for JWT verification
 # and by sqlx for MySQL auth (we use Postgres, so that path is dead code).
-ignore = ["RUSTSEC-2023-0071"]
+ignore = [
+    "RUSTSEC-2023-0071",
+
+    # aws-lc-sys X.509 name constraints bypass and CRL logic error.
+    # Transitive via peat-mesh -> iroh -> rustls -> aws-lc-rs.
+    # Awaiting aws-lc-rs release with aws-lc-sys >= 0.39.
+    "RUSTSEC-2026-0044",
+    "RUSTSEC-2026-0048",
+
+    # rustls-webpki CRL distribution point matching logic error.
+    # Transitive via async-nats -> rustls -> rustls-webpki 0.102.
+    # Awaiting async-nats release with updated rustls.
+    "RUSTSEC-2026-0049",
+]
+# Unmaintained crate warnings — all transitive, no direct alternatives.
+informational_warnings = ["unmaintained"]
+
+[yanked]
+enabled = true
