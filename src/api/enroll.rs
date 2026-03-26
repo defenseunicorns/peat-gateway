@@ -297,33 +297,80 @@ mod inner {
         body.and_then(|b| b.token.clone())
     }
 
-    /// Introspect an OIDC token by hitting the issuer's userinfo endpoint.
+    /// Introspect an OIDC token per RFC 7662 using the IdP's introspection endpoint.
+    ///
+    /// Authenticates to the introspection endpoint with client credentials and checks
+    /// the `active` field in the response. Falls back to the userinfo endpoint if the
+    /// IdP does not advertise an introspection endpoint in its discovery document.
     async fn introspect_oidc_token(
         issuer_url: &str,
-        _client_id: &str,
-        _client_secret: &str,
+        client_id: &str,
+        client_secret: &str,
         bearer: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, anyhow::Error> {
-        use openidconnect::core::CoreProviderMetadata;
-        use openidconnect::IssuerUrl;
-
-        let issuer = IssuerUrl::new(issuer_url.to_string())
-            .map_err(|e| anyhow::anyhow!("Invalid issuer URL: {e}"))?;
-
-        // Discover provider metadata
-        let http_client = openidconnect::reqwest::Client::new();
-        let metadata = CoreProviderMetadata::discover_async(issuer, &http_client)
-            .await
-            .map_err(|e| anyhow::anyhow!("OIDC discovery failed: {e}"))?;
-
-        // Use the userinfo endpoint to validate the token and get claims
-        let userinfo_url = metadata
-            .userinfo_endpoint()
-            .ok_or_else(|| anyhow::anyhow!("IdP has no userinfo endpoint"))?;
-
         let client = reqwest::Client::new();
+
+        // Fetch the OIDC discovery document to find available endpoints
+        let discovery_url = format!(
+            "{}/.well-known/openid-configuration",
+            issuer_url.trim_end_matches('/')
+        );
+        let discovery: serde_json::Value = client
+            .get(&discovery_url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("OIDC discovery request failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("OIDC discovery response parse failed: {e}"))?;
+
+        // Try RFC 7662 token introspection first
+        if let Some(introspection_url) = discovery
+            .get("introspection_endpoint")
+            .and_then(|v| v.as_str())
+        {
+            let resp = client
+                .post(introspection_url)
+                .basic_auth(client_id, Some(client_secret))
+                .form(&[("token", bearer)])
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Token introspection request failed: {e}"))?;
+
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "Introspection endpoint returned {} — check client credentials",
+                    resp.status()
+                );
+            }
+
+            let body: serde_json::Map<String, serde_json::Value> = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to parse introspection response: {e}"))?;
+
+            // RFC 7662 requires the `active` field
+            match body.get("active") {
+                Some(serde_json::Value::Bool(true)) => return Ok(body),
+                Some(serde_json::Value::Bool(false)) => {
+                    anyhow::bail!("Token is not active (revoked or expired)");
+                }
+                _ => {
+                    anyhow::bail!("Introspection response missing required 'active' field");
+                }
+            }
+        }
+
+        // Fall back to userinfo endpoint for IdPs that don't support RFC 7662
+        let userinfo_url = discovery
+            .get("userinfo_endpoint")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("IdP has neither introspection nor userinfo endpoint")
+            })?;
+
         let resp = client
-            .get(userinfo_url.url().as_str())
+            .get(userinfo_url)
             .bearer_auth(bearer)
             .send()
             .await
