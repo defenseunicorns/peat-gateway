@@ -51,6 +51,13 @@ spec:
               value: {{ .Values.storage.postgres.url | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.encryption.existingSecret }}
+            - name: PEAT_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.encryption.existingSecret }}
+                  key: {{ .Values.encryption.secretKey }}
+            {{- end }}
             {{- if .Values.cdc.nats.url }}
             - name: PEAT_CDC_NATS_URL
               value: {{ .Values.cdc.nats.url | quote }}

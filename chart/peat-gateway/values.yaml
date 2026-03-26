@@ -19,6 +19,13 @@ storage:
     # Use existing secret for connection string (key: url)
     existingSecret: ""
 
+# -- Envelope encryption (KEK)
+encryption:
+  # Use existing secret containing the key-encryption-key
+  existingSecret: ""
+  # Key within the secret that holds the KEK value
+  secretKey: peat-kek
+
 # -- Persistent storage for redb database and Iroh state
 persistence:
   enabled: true
