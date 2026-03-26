@@ -14,6 +14,7 @@ use crate::tenant::models::PeerInfo;
 use crate::tenant::TenantManager;
 
 type ApiError = (axum::http::StatusCode, String);
+type BrokerMap = HashMap<(String, String), Arc<dyn MeshBrokerState>>;
 
 fn not_found(e: anyhow::Error) -> ApiError {
     (axum::http::StatusCode::NOT_FOUND, e.to_string())
@@ -29,7 +30,7 @@ fn internal(e: anyhow::Error) -> ApiError {
 /// nodes register their broker state handles here so the API can query them.
 #[derive(Clone, Default)]
 pub struct MeshStateRegistry {
-    inner: Arc<RwLock<HashMap<(String, String), Arc<dyn MeshBrokerState>>>>,
+    inner: Arc<RwLock<BrokerMap>>,
 }
 
 impl MeshStateRegistry {
