@@ -21,6 +21,15 @@ ignore = [
     # Transitive via async-nats -> rustls -> rustls-webpki 0.102.
     # Awaiting async-nats release with updated rustls.
     "RUSTSEC-2026-0049",
+
+    # rustls-webpki name constraints (URI + wildcard) and CRL parsing panic.
+    # Same chain: async-nats 0.38 -> rustls -> rustls-webpki 0.102.
+    # Name constraints: post-signature-verify only, requires misissuance.
+    # CRL panic: not reachable — gateway does not parse CRLs.
+    # Awaiting async-nats release with rustls-webpki >= 0.103.13.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
 ]
 # Unmaintained crate warnings — all transitive, no direct alternatives.
 informational_warnings = ["unmaintained"]
