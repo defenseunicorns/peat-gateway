@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/defenseunicorns/peat/main/assets/peat-wordmark.png" alt="PEAT" width="420">
+</p>
+
 # peat-gateway
 
 Manages the organizational side of [Peat](https://github.com/defenseunicorns/peat) mesh networks — onboarding diverse teams, federating identity systems, and streaming mesh events to enterprise tooling.
