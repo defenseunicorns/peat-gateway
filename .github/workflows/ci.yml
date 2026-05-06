@@ -139,6 +139,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo generate-lockfile
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --quiet
+      - name: Run audit (fail on vulnerabilities, warn on unmaintained)
+        # cargo-audit's only config-file path is ~/.cargo/audit.toml (outside
+        # the repo). Inline `--ignore` flags here are the canonical mechanism
+        # for workspace-tracked exceptions. Each entry below should be
+        # revisited when upstream ships a fix reachable from our dep tree.
+        #
+        # RUSTSEC-2026-0118 — hickory-proto NSEC3 closest-encloser unbounded
+        # loop. Fix moved to hickory-net 0.26.x; reachable only from DNSSEC
+        # validation paths peat-gateway does not enable. Pulled transitively
+        # via iroh (through peat-mesh). Drop when iroh stops shipping
+        # hickory-proto 0.25.x.
+        #
+        # RUSTSEC-2026-0119 — hickory-proto O(n²) name-compression DoS. Fixed
+        # in hickory-proto 0.26.1. Pulled transitively via iroh (through
+        # peat-mesh). Drop when iroh updates to hickory-proto >=0.26.1.
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0118 \
+            --ignore RUSTSEC-2026-0119 \
+            2>&1 || true
+          cargo audit \
+            --ignore RUSTSEC-2026-0118 \
+            --ignore RUSTSEC-2026-0119 \
+            --json 2>/dev/null | jq -e '.vulnerabilities.count == 0'
