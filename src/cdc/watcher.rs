@@ -550,6 +550,7 @@ mod tests {
                 vault_addr: None,
                 vault_token: None,
                 vault_transit_key: None,
+                ingress: crate::config::IngressConfig::default(),
             };
             let tenant_mgr = TenantManager::new(&config).await.unwrap();
             let engine = CdcEngine::new(&config, tenant_mgr.clone()).await.unwrap();

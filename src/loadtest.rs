@@ -239,6 +239,7 @@ pub async fn spawn_test_server() -> Result<(String, tempfile::TempDir)> {
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: crate::config::IngressConfig::default(),
     };
 
     let tenant_mgr = TenantManager::new(&config).await?;

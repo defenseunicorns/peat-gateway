@@ -255,6 +255,7 @@ async fn setup_failing() -> (
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: peat_gateway::config::IngressConfig::default(),
     };
 
     let inner = storage::open(&config.storage).await.unwrap();

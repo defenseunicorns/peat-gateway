@@ -76,6 +76,7 @@ fn base_config(db_path: &std::path::Path) -> GatewayConfig {
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: peat_gateway::config::IngressConfig::default(),
     }
 }
 

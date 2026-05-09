@@ -112,7 +112,7 @@ jobs:
           exit 1
 
       - name: NATS sink tests
-        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests
+        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests
         env:
           NATS_URL: nats://localhost:4222
 
