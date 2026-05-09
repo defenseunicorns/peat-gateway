@@ -93,7 +93,7 @@ Sinks can be added or removed via the admin API without restarting the gateway. 
 
 ## Functional Test Harness (NATS)
 
-NATS sink tests run against a **live broker**, not a mock. CI brings up `nats:latest` as a service container in the `nats-integration` job; locally, run `nats-server` (or `docker run -p 4222:4222 nats:latest`) and `cargo test --features nats --test nats_sink_tests`. The test file probes the broker on startup and skips cleanly when it's unreachable, so default-feature CI is unaffected.
+NATS sink tests run against a **live broker**, not a mock. CI runs `nats:latest --jetstream` in the `nats-integration` job; locally, run `nats-server --jetstream` (or `docker run -p 4222:4222 nats:latest --jetstream`) and `cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests`. JetStream is required because peat-gateway#91 introduces a control-plane ingress subscriber that uses durable JetStream consumers (per ADR-055 Amendment A); the sink-side tests don't need it but enabling it is harmless. The test files probe the broker on startup and skip cleanly when it's unreachable, so default-feature CI is unaffected.
 
 The reusable harness lives in [`tests/common/nats.rs`](../tests/common/nats.rs). It is intentionally usable from both publish-side tests (today) and ingress-side tests (future full-duplex work) without churn.
 
@@ -104,6 +104,7 @@ The reusable harness lives in [`tests/common/nats.rs`](../tests/common/nats.rs).
 - `make_event(org, app, doc, change_hash)` — a stable `CdcEvent` builder; tests mutate the returned struct when they need different actors/patches.
 - `subscribe(client, subject)` → `EventStream` — typed wrapper over `async_nats::Subscriber` with `next_event(timeout)`, `next_message(timeout)`, and `assert_silent(within)` for negative assertions.
 - `BrokerProxy` — local TCP proxy fronting the real broker, used to simulate broker churn deterministically. `block()` resets all live connections and refuses new ones; `unblock()` resumes accepting. The `async_nats` client treats this exactly like a transient broker outage, exercising its built-in reconnect/backoff.
+- `jetstream(client)` / `ensure_stream(js, name, subjects)` / `ensure_push_consumer(stream, durable, deliver, filter)` / `publish_ctl(js, subject, payload)` / `delete_stream(js, name)` — JetStream helpers added in Step 1 of peat-gateway#91. They `.expect()` on failure (test-infra style) and assume the broker has JetStream enabled.
 
 **Adding new tests:**
 

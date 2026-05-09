@@ -14,6 +14,16 @@
 //!
 //! Tests skip silently if NATS is unreachable — both the `Harness` and the
 //! standalone client constructors return `Option`.
+//!
+//! ## JetStream helpers (Step 1 of peat-gateway#91)
+//!
+//! [`jetstream`], [`ensure_stream`], [`ensure_push_consumer`], [`publish_ctl`],
+//! and [`delete_stream`] expose just enough of the `async_nats::jetstream`
+//! surface for tests. They `.expect()` on failure (matching the rest of this
+//! module's test-infra style) and assume the broker has JetStream enabled —
+//! locally that means `nats-server --jetstream` (or
+//! `docker run nats:latest --jetstream`); CI's `nats-integration` job runs
+//! the broker with that flag.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,6 +166,81 @@ impl EventStream {
         );
     }
 }
+
+// ── JetStream helpers ───────────────────────────────────────────
+
+/// Get a JetStream context from a connected client. Cheap — a context is just
+/// a thin wrapper that issues JS API requests over the existing connection.
+pub fn jetstream(client: &async_nats::Client) -> async_nats::jetstream::Context {
+    async_nats::jetstream::new(client.clone())
+}
+
+/// Idempotently create a stream with the given subjects. Returns the
+/// `async_nats::jetstream::stream::Stream` handle. If a stream with the same
+/// name already exists, its existing config is returned unchanged — tests
+/// that need a fresh config should `delete_stream` first.
+pub async fn ensure_stream(
+    js: &async_nats::jetstream::Context,
+    name: &str,
+    subjects: Vec<String>,
+) -> async_nats::jetstream::stream::Stream {
+    js.get_or_create_stream(async_nats::jetstream::stream::Config {
+        name: name.into(),
+        subjects,
+        ..Default::default()
+    })
+    .await
+    .expect("ensure_stream failed")
+}
+
+/// Best-effort delete. Ignores not-found so tests can call this in setup
+/// without checking existence first.
+pub async fn delete_stream(js: &async_nats::jetstream::Context, name: &str) {
+    let _ = js.delete_stream(name).await;
+}
+
+/// Idempotently create a durable push consumer on the stream. The consumer
+/// subscribes to `deliver_subject` internally when callers invoke
+/// `.messages()`. `filter_subject` scopes which stream subjects the consumer
+/// receives — the production ingress engine uses this for per-org tenant
+/// isolation.
+pub async fn ensure_push_consumer(
+    stream: &async_nats::jetstream::stream::Stream,
+    durable: &str,
+    deliver_subject: &str,
+    filter_subject: &str,
+) -> async_nats::jetstream::consumer::Consumer<async_nats::jetstream::consumer::push::Config> {
+    stream
+        .get_or_create_consumer(
+            durable,
+            async_nats::jetstream::consumer::push::Config {
+                durable_name: Some(durable.into()),
+                deliver_subject: deliver_subject.into(),
+                filter_subject: filter_subject.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ensure_push_consumer failed")
+}
+
+/// Publish a JSON-serializable payload to the JetStream context. Returns
+/// after the broker acks the publish — so callers can rely on the message
+/// being durably persisted before they assert on consumer-side delivery.
+pub async fn publish_ctl<T: serde::Serialize>(
+    js: &async_nats::jetstream::Context,
+    subject: &str,
+    payload: &T,
+) {
+    let bytes = serde_json::to_vec(payload).expect("payload serialize failed");
+    js.publish(subject.to_string(), bytes.into())
+        .await
+        .expect("jetstream publish failed")
+        .await
+        .expect("jetstream publish ack failed");
+}
+
+// ── Core subscribe helpers ──────────────────────────────────────
 
 /// Subscribe to a subject (or wildcard) and return a typed `EventStream`.
 ///
