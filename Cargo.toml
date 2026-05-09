@@ -55,6 +55,9 @@ base64 = { version = "0.22", optional = true }
 
 # CDC sinks (optional)
 async-nats = { version = "0.38", optional = true }
+# Stream traits for the JetStream consumer dispatch loop. Optional so the
+# dep is only pulled when the `nats` feature is on.
+futures-util = { version = "0.3", optional = true }
 rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 tempfile = { version = "3", optional = true }
@@ -76,7 +79,7 @@ metrics-exporter-prometheus = "0.16"
 
 [features]
 default = ["nats", "webhook", "oidc"]
-nats = ["dep:async-nats"]
+nats = ["dep:async-nats", "dep:futures-util"]
 kafka = ["dep:rdkafka"]
 webhook = ["dep:reqwest"]
 oidc = ["dep:reqwest"]

@@ -35,25 +35,42 @@
 //!    `filter_subjects` on each consumer (in-process check, defence-in-depth
 //!    layered with broker-level account ACLs tracked in #97).
 //!
-//! Step 4 adds the dispatch loop, typed event handlers, AuthZ Proxy
-//! integration, and the TenantManager → IngressEngine wiring so consumer
-//! lifecycle is driven automatically by org/formation lifecycle. Until then
-//! callers (or tests) invoke the lifecycle methods directly and pull
-//! messages off `consumer_for_org`.
+//!  - **Step 4a** — typed event payloads (`events`), Handler trait +
+//!    Dispatcher (`handlers`), per-org dispatch loop auto-spawned by
+//!    `ensure_org_subscription`, subject parsing
+//!    (`{org}.{app|_org}.ctl.<kind>`), in-process `org_id` revalidation
+//!    against the tenant manager (defence-in-depth with broker ACLs
+//!    tracked in #97), AuthZ hook (permissive stub — Phase 3 plugs in
+//!    the real engine), formations CRUD wired end-to-end, peers / certs /
+//!    idp handlers stubbed pending #99.
+//!
+//! Still deferred for follow-up:
+//!  - DLQ for messages that exhaust `max_deliver` — #108.
+//!  - TenantManager → IngressEngine observer wiring so consumer lifecycle
+//!    is driven automatically by org lifecycle (today the API layer or
+//!    tests must invoke `ensure_org_subscription` themselves).
 
 #![cfg(feature = "nats")]
+
+pub mod events;
+pub mod handlers;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_nats::jetstream::{
     self,
     consumer::{push, Consumer},
+    AckKind,
 };
+use futures_util::StreamExt;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
+
+use handlers::{Dispatcher, HandlerContext, PermissiveAuthz};
 
 // ── Consumer config defaults ────────────────────────────────────
 //
@@ -130,7 +147,6 @@ pub type IngressConsumer = Consumer<push::Config>;
 #[derive(Clone)]
 pub struct IngressEngine {
     inner: Option<Inner>,
-    #[allow(dead_code)] // wired into the dispatch loop in Step 4
     tenants: TenantManager,
 }
 
@@ -139,6 +155,18 @@ struct Inner {
     js: jetstream::Context,
     config: NatsIngressConfig,
     consumers: Arc<Mutex<HashMap<String, IngressConsumer>>>,
+    /// Per-org dispatch task handles, keyed by `org_id`. Tasks are
+    /// auto-spawned by `ensure_org_subscription` and aborted by
+    /// `remove_org_subscription`. Both happen under `stream_lock` so the
+    /// task lifecycle stays in sync with consumer + registry state.
+    tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Routes parsed messages to typed handlers (see `handlers::Dispatcher`).
+    /// Single shared instance across all org dispatch loops — handlers are
+    /// `Arc`'d internally so this is cheap to share.
+    dispatcher: Arc<Dispatcher>,
+    /// AuthZ Proxy hook. Permissive stub today (#91 Step 4 Phase 3
+    /// installs the real engine — handlers/AuthzCheck trait).
+    authz: Arc<dyn handlers::AuthzCheck>,
     /// Serializes stream-config mutations (`update_stream` /
     /// `create_stream` / `delete_stream`) so concurrent
     /// `ensure_org_subscription` / `remove_org_subscription` calls on
@@ -175,11 +203,28 @@ impl IngressEngine {
             "Control-plane ingress engine initialized"
         );
 
+        let dispatcher = Arc::new(Dispatcher::default_for(tenants.clone()));
+        let authz: Arc<dyn handlers::AuthzCheck> = Arc::new(PermissiveAuthz);
+
+        // Surface the permissive-stub AuthZ at boot so operators see the
+        // posture without having to read every per-message info-level
+        // audit line. The real engine is Phase 3 (peat-gateway#99); the
+        // primary tenant boundary today is the broker-level account ACL
+        // tracked in peat-gateway#97. Both are required for production.
+        warn!(
+            "Control-plane ingress AuthZ is the PERMISSIVE STUB — every event is allowed. \
+             Production requires peat-gateway#99 (real policy engine) and peat-gateway#97 \
+             (broker-level account ACLs)."
+        );
+
         Ok(Self {
             inner: Some(Inner {
                 js,
                 config: nats_cfg,
                 consumers: Arc::new(Mutex::new(HashMap::new())),
+                tasks: Arc::new(Mutex::new(HashMap::new())),
+                dispatcher,
+                authz,
                 stream_lock: Arc::new(Mutex::new(())),
             }),
             tenants,
@@ -189,6 +234,12 @@ impl IngressEngine {
     /// True when ingress was wired (NATS configured).
     pub fn is_enabled(&self) -> bool {
         self.inner.is_some()
+    }
+
+    /// Borrow the engine's `TenantManager`. Used by tests asserting handler
+    /// effects and by the API layer when wiring observers.
+    pub fn tenants(&self) -> &TenantManager {
+        &self.tenants
     }
 
     /// Returns the configured stream name when ingress is enabled.
@@ -258,7 +309,25 @@ impl IngressEngine {
             .consumers
             .lock()
             .await
-            .insert(org_id.to_string(), consumer);
+            .insert(org_id.to_string(), consumer.clone());
+
+        // Spawn a per-org dispatch task that pulls from this consumer and
+        // routes each message through the dispatcher + AuthZ + revalidation
+        // pipeline. Idempotency: replace any existing task for the same
+        // org (e.g. on a re-ensure after broker churn).
+        let mut tasks_guard = inner.tasks.lock().await;
+        if let Some(prior) = tasks_guard.remove(org_id) {
+            prior.abort();
+        }
+        let task = spawn_dispatch_loop(
+            org_id.to_string(),
+            consumer,
+            inner.dispatcher.clone(),
+            inner.authz.clone(),
+            self.tenants.clone(),
+        );
+        tasks_guard.insert(org_id.to_string(), task);
+        drop(tasks_guard);
 
         info!(
             org_id = org_id,
@@ -287,6 +356,9 @@ impl IngressEngine {
         // entry pointing at a JetStream consumer that's been deleted.
         let _stream_guard = inner.stream_lock.lock().await;
         inner.consumers.lock().await.remove(org_id);
+        if let Some(task) = inner.tasks.lock().await.remove(org_id) {
+            task.abort();
+        }
 
         // delete_consumer returns NotFound for already-removed consumers;
         // log and swallow so this stays idempotent.
@@ -487,4 +559,210 @@ async fn try_ensure_stream_excludes(
         .await
         .with_context(|| format!("update_stream({name}) on shrink failed"))?;
     Ok(())
+}
+
+// ── Dispatch loop ────────────────────────────────────────────────────
+
+/// Spawn the per-org dispatch task. Reads from the consumer, parses each
+/// message's subject, validates the parsed `org_id` against the expected
+/// org (in-process tenant-isolation layer; #97 tracks the broker-level
+/// account ACL), then routes to the dispatcher. Successful handler →
+/// `ack`; handler error → `Nak(None)` so JetStream applies its
+/// `max_deliver` retry budget (#104) and ultimately drops to the DLQ
+/// once #108 ships.
+fn spawn_dispatch_loop(
+    org_id: String,
+    consumer: IngressConsumer,
+    dispatcher: Arc<Dispatcher>,
+    authz: Arc<dyn handlers::AuthzCheck>,
+    tenants: TenantManager,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut messages = match consumer.messages().await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "ingress dispatch loop: failed to open messages stream; task exiting"
+                );
+                return;
+            }
+        };
+
+        loop {
+            let next = messages.next().await;
+            let msg = match next {
+                Some(Ok(m)) => m,
+                Some(Err(e)) => {
+                    warn!(org_id = %org_id, error = %e, "ingress dispatch: messages stream error");
+                    continue;
+                }
+                None => {
+                    info!(org_id = %org_id, "ingress dispatch: messages stream closed; task exiting");
+                    return;
+                }
+            };
+
+            let subject = msg.subject.as_str().to_string();
+            match handle_one_message(
+                &subject,
+                &msg.payload,
+                &org_id,
+                &dispatcher,
+                &authz,
+                &tenants,
+            )
+            .await
+            {
+                Ok(()) => {
+                    if let Err(e) = msg.ack().await {
+                        warn!(org_id = %org_id, subject = %subject, error = %e, "ingress dispatch: ack failed");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        org_id = %org_id,
+                        subject = %subject,
+                        error = %e,
+                        "ingress dispatch: handler error; nack'ing for retry"
+                    );
+                    if let Err(ack_err) = msg.ack_with(AckKind::Nak(None)).await {
+                        warn!(org_id = %org_id, subject = %subject, error = %ack_err, "ingress dispatch: nack failed");
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Process one message end-to-end: parse subject, revalidate org_id, route
+/// to a handler. Returns Err if any step fails — the caller nack's to apply
+/// JetStream's redelivery / DLQ semantics.
+async fn handle_one_message(
+    subject: &str,
+    payload: &[u8],
+    expected_org_id: &str,
+    dispatcher: &Dispatcher,
+    authz: &Arc<dyn handlers::AuthzCheck>,
+    tenants: &TenantManager,
+) -> Result<()> {
+    let parsed = parse_ctl_subject(subject)?;
+
+    // In-process org_id revalidation (defence-in-depth — broker ACLs are
+    // primary and tracked in #97). Two checks:
+    //
+    //  1. The org_id in the subject must match the consumer's own org.
+    //     A mismatch means the consumer's filter_subjects somehow let
+    //     a cross-org message through — which would be a JetStream bug
+    //     or a misconfiguration, but we still refuse to act on it.
+    //
+    //  2. The org must exist in the tenant manager. A subject for an
+    //     unknown org is dropped (the org may have been destroyed
+    //     mid-flight, or the subject may be malicious/stale).
+    if parsed.org_id != expected_org_id {
+        return Err(anyhow!(
+            "ingress org_id mismatch: subject says {parsed_org}, consumer is for {expected_org} \
+             (subject {subject})",
+            parsed_org = parsed.org_id,
+            expected_org = expected_org_id
+        ));
+    }
+    tenants.get_org(parsed.org_id).await.with_context(|| {
+        format!(
+            "ingress unknown org_id {} (subject {subject})",
+            parsed.org_id
+        )
+    })?;
+
+    let ctx = HandlerContext {
+        org_id: parsed.org_id,
+        app_id: parsed.app_id,
+        subject,
+        tenants,
+        authz: authz.as_ref(),
+    };
+    dispatcher.dispatch(&ctx, parsed.kind, payload).await
+}
+
+/// A control-plane ingress subject parsed into its structural pieces. All
+/// references borrow from the input `&str`.
+struct ParsedCtlSubject<'a> {
+    /// Token 0 — the org_id.
+    org_id: &'a str,
+    /// Token 1 — `_org` (sentinel for org-level lifecycle) or a real
+    /// formation `app_id`.
+    app_id: &'a str,
+    /// Tokens 3..N — the event kind, `.`-joined (e.g. "formations.create",
+    /// "peers.enroll.request"). Token 2 is always literally `ctl`.
+    kind: &'a str,
+}
+
+/// Parse `{org_id}.{app_id}.ctl.<kind>` into structured pieces. The kind
+/// segment may contain dots (e.g. `peers.enroll.request`).
+fn parse_ctl_subject(subject: &str) -> Result<ParsedCtlSubject<'_>> {
+    // Need at least 4 tokens: org, app, "ctl", and one kind token.
+    let mut parts = subject.splitn(4, '.');
+    let org_id = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("ingress subject {subject} missing org_id token"))?;
+    let app_id = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("ingress subject {subject} missing app_id token"))?;
+    let ctl = parts
+        .next()
+        .ok_or_else(|| anyhow!("ingress subject {subject} missing ctl token"))?;
+    if ctl != "ctl" {
+        return Err(anyhow!(
+            "ingress subject {subject} third token must be 'ctl', got '{ctl}'"
+        ));
+    }
+    let kind = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("ingress subject {subject} missing event kind"))?;
+    Ok(ParsedCtlSubject {
+        org_id,
+        app_id,
+        kind,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ctl_subject_org_level() {
+        let p = parse_ctl_subject("acme._org.ctl.formations.create").unwrap();
+        assert_eq!(p.org_id, "acme");
+        assert_eq!(p.app_id, "_org");
+        assert_eq!(p.kind, "formations.create");
+    }
+
+    #[test]
+    fn parse_ctl_subject_per_formation_multi_token_kind() {
+        let p = parse_ctl_subject("acme.logistics.ctl.peers.enroll.request").unwrap();
+        assert_eq!(p.org_id, "acme");
+        assert_eq!(p.app_id, "logistics");
+        assert_eq!(p.kind, "peers.enroll.request");
+    }
+
+    #[test]
+    fn parse_ctl_subject_rejects_missing_ctl() {
+        assert!(parse_ctl_subject("acme.logistics.docs.changes").is_err());
+    }
+
+    #[test]
+    fn parse_ctl_subject_rejects_empty_kind() {
+        assert!(parse_ctl_subject("acme.logistics.ctl").is_err());
+    }
+
+    #[test]
+    fn parse_ctl_subject_rejects_too_short() {
+        assert!(parse_ctl_subject("acme").is_err());
+        assert!(parse_ctl_subject("acme.logistics").is_err());
+    }
 }
