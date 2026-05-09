@@ -5,6 +5,8 @@ pub mod cdc;
 pub mod cli;
 pub mod config;
 pub mod crypto;
+#[cfg(feature = "nats")]
+pub mod ingress;
 pub mod storage;
 pub mod tenant;
 

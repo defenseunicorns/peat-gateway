@@ -10,6 +10,10 @@ pub struct GatewayConfig {
     pub storage: StorageConfig,
     /// CDC configuration
     pub cdc: CdcConfig,
+    /// Control-plane ingress configuration (ADR-055 Amendment A; peat-gateway#91).
+    /// Default-constructed = ingress disabled, preserving existing deployments.
+    #[serde(default)]
+    pub ingress: IngressConfig,
     /// Optional directory to serve the admin UI from
     pub ui_dir: Option<String>,
     /// Hex-encoded 256-bit key-encryption key for genesis envelope encryption.
@@ -42,6 +46,42 @@ pub struct CdcConfig {
     pub kafka_brokers: Option<String>,
 }
 
+/// Control-plane ingress configuration (ADR-055 Amendment A).
+///
+/// The gateway *consumes* control-plane events from external orchestration
+/// systems over NATS, alongside the existing CDC publish path. Ingress is
+/// disabled by default — `nats: None` keeps existing deployments untouched
+/// until they explicitly opt in.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct IngressConfig {
+    /// NATS-based ingress configuration. `None` disables ingress entirely.
+    pub nats: Option<NatsIngressConfig>,
+}
+
+/// NATS-specific ingress settings — JetStream stream + per-org durable
+/// consumer naming.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NatsIngressConfig {
+    /// NATS server URL. Typically the same broker the CDC sink publishes to.
+    pub url: String,
+    /// JetStream stream name covering all `*.ctl.>` and `*.*.ctl.>` subjects.
+    /// Defaults to `peat-gw-ctl`.
+    #[serde(default = "default_ingress_stream_name")]
+    pub stream_name: String,
+    /// Durable consumer name prefix, used to derive per-org consumer names
+    /// like `{prefix}-{org_id}`. Defaults to `peat-gw`.
+    #[serde(default = "default_ingress_consumer_prefix")]
+    pub consumer_prefix: String,
+}
+
+fn default_ingress_stream_name() -> String {
+    "peat-gw-ctl".into()
+}
+
+fn default_ingress_consumer_prefix() -> String {
+    "peat-gw".into()
+}
+
 impl GatewayConfig {
     pub fn from_env() -> Result<Self> {
         let storage = match env::var("PEAT_STORAGE_BACKEND")
@@ -61,6 +101,18 @@ impl GatewayConfig {
             }
         };
 
+        let ingress = IngressConfig {
+            nats: env::var("PEAT_INGRESS_NATS_URL")
+                .ok()
+                .map(|url| NatsIngressConfig {
+                    url,
+                    stream_name: env::var("PEAT_INGRESS_STREAM_NAME")
+                        .unwrap_or_else(|_| default_ingress_stream_name()),
+                    consumer_prefix: env::var("PEAT_INGRESS_CONSUMER_PREFIX")
+                        .unwrap_or_else(|_| default_ingress_consumer_prefix()),
+                }),
+        };
+
         Ok(Self {
             bind_addr: env::var("PEAT_GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             storage,
@@ -68,6 +120,7 @@ impl GatewayConfig {
                 nats_url: env::var("PEAT_CDC_NATS_URL").ok(),
                 kafka_brokers: env::var("PEAT_CDC_KAFKA_BROKERS").ok(),
             },
+            ingress,
             ui_dir: env::var("PEAT_UI_DIR").ok(),
             admin_token: env::var("PEAT_ADMIN_TOKEN").ok(),
             kek: env::var("PEAT_KEK").ok(),

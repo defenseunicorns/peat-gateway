@@ -56,6 +56,7 @@ async fn spawn_two_orgs() -> (Client, String, OrgFixture, OrgFixture, tempfile::
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: peat_gateway::config::IngressConfig::default(),
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
@@ -575,6 +576,7 @@ async fn cdc_layer_cross_org_event_isolation() {
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: peat_gateway::config::IngressConfig::default(),
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();

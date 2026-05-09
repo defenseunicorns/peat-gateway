@@ -304,6 +304,7 @@ mod tests {
             vault_addr: None,
             vault_token: None,
             vault_transit_key: None,
+            ingress: crate::config::IngressConfig::default(),
         }
     }
 

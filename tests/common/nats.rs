@@ -99,6 +99,7 @@ impl Harness {
             vault_addr: None,
             vault_token: None,
             vault_transit_key: None,
+            ingress: peat_gateway::config::IngressConfig::default(),
         };
 
         let tenants = TenantManager::new(&config).await.unwrap();

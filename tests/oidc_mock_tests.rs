@@ -193,6 +193,7 @@ async fn setup_with_mock_idp(
         vault_addr: None,
         vault_token: None,
         vault_transit_key: None,
+        ingress: peat_gateway::config::IngressConfig::default(),
     };
 
     let store = storage::open(&config.storage).await.unwrap();
