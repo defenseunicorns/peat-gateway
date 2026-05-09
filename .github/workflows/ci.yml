@@ -85,11 +85,10 @@ jobs:
   nats-integration:
     name: NATS sink integration
     runs-on: ubuntu-latest
-    services:
-      nats:
-        image: nats:latest
-        ports:
-          - 4222:4222
+    # Run nats-server as a step rather than a service container so we can
+    # pass `--jetstream`. GH Actions service containers don't support CMD
+    # overrides — and JetStream is needed for the control-plane ingress
+    # subscriber introduced in peat-gateway#91.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -98,10 +97,28 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
 
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d --name nats-test -p 4222:4222 nats:latest --jetstream
+          for i in $(seq 1 20); do
+            if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
+              echo "NATS reachable on 4222"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "NATS did not become reachable" >&2
+          docker logs nats-test || true
+          exit 1
+
       - name: NATS sink tests
-        run: cargo test --features nats --test nats_sink_tests
+        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests
         env:
           NATS_URL: nats://localhost:4222
+
+      - name: Stop NATS
+        if: always()
+        run: docker stop nats-test || true
 
   feature-matrix:
     name: Feature builds
