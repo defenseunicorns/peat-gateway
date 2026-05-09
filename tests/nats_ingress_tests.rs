@@ -494,3 +494,58 @@ async fn concurrent_ensure_org_subscription_lands_every_org() {
 
     delete_stream(&js, &stream_name).await;
 }
+
+#[tokio::test]
+async fn concurrent_ensure_and_remove_same_org_converges_consistently() {
+    // QA Review on PR #111 caught: if remove_org_subscription drops the
+    // registry entry *before* taking the stream_lock, an interleaving
+    // ensure on the same org can land mid-removal — leaving the
+    // registry stale w.r.t. the deleted JetStream consumer.
+    //
+    // Asserts that after running ensure and remove concurrently many
+    // times, the engine's registry view always matches the broker's
+    // consumer existence (either both present or both absent).
+
+    let stream_name = unique_stream("ensure-remove-race");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    // Single org, lots of churn. Final ordering is non-deterministic;
+    // the assertion is on consistency, not on a specific end state.
+    let org = unique_org("acme");
+
+    for _round in 0..5 {
+        let e1 = engine.clone();
+        let e2 = engine.clone();
+        let o1 = org.clone();
+        let o2 = org.clone();
+        let h_ensure = tokio::spawn(async move { e1.ensure_org_subscription(&o1).await });
+        let h_remove = tokio::spawn(async move { e2.remove_org_subscription(&o2).await });
+        h_ensure.await.unwrap().unwrap();
+        h_remove.await.unwrap().unwrap();
+    }
+
+    // After the dust settles, registry presence and broker presence
+    // must agree. Either both are gone (final op was remove) or both
+    // exist (final op was ensure).
+    let in_registry = engine.consumer_for_org(&org).await.is_some();
+    let on_broker = match js.get_stream(&stream_name).await {
+        Ok(stream) => stream
+            .get_consumer::<async_nats::jetstream::consumer::push::Config>(&format!(
+                "peat-gw-test-{org}"
+            ))
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    assert_eq!(
+        in_registry, on_broker,
+        "registry/broker view diverged after ensure+remove churn: in_registry={in_registry}, on_broker={on_broker}"
+    );
+
+    delete_stream(&js, &stream_name).await;
+}

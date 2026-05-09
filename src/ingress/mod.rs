@@ -97,10 +97,13 @@ const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
 // Two layers of mitigation:
 //
 //  1. Process-local mutex on `Inner::stream_lock` serializes the
-//     entire read-merge-update on a single engine instance. Holding the
-//     mutex through `update_stream`'s round-trip means concurrent
-//     `ensure_org_subscription` / `remove_org_subscription` calls within
-//     this gateway never race each other.
+//     entire read-merge-update on a single engine instance — and the
+//     per-org consumer registry mutation that goes with it. Holding the
+//     mutex from registry-touch through `update_stream`'s round-trip
+//     means concurrent `ensure_org_subscription` /
+//     `remove_org_subscription` calls within this gateway never race
+//     each other on the same org's subjects, consumer, or registry
+//     entry.
 //
 //  2. Best-effort retry on `update_stream` errors. JetStream's stream
 //     config has no built-in CAS / revision token, so we can't
@@ -274,12 +277,16 @@ impl IngressEngine {
         };
 
         let durable = consumer_name(&inner.config.consumer_prefix, org_id);
-        inner.consumers.lock().await.remove(org_id);
 
-        // Hold the stream lock across delete_consumer + the
-        // ensure_stream_excludes call so a concurrent ensure_org_subscription
-        // can't race the subject removal.
+        // Hold the stream lock across the *entire* removal — registry drop,
+        // delete_consumer, and ensure_stream_excludes — so a concurrent
+        // ensure_org_subscription on the same org can't insert into the
+        // registry between our drop and our delete_consumer call. Per QA
+        // Review on PR #111: with the registry drop outside the guard, an
+        // ensure-then-remove interleaving would leave a stale registry
+        // entry pointing at a JetStream consumer that's been deleted.
         let _stream_guard = inner.stream_lock.lock().await;
+        inner.consumers.lock().await.remove(org_id);
 
         // delete_consumer returns NotFound for already-removed consumers;
         // log and swallow so this stays idempotent.
