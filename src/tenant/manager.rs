@@ -626,7 +626,19 @@ const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 1024;
 
 /// Validate an identifier field (org_id, app_id, etc.):
-/// must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` and be at most 128 characters.
+/// must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` and be at most 128 characters.
+///
+/// `.` is **rejected** because identifiers flow into NATS subject patterns
+/// in the control-plane ingress engine (peat-gateway#91). Allowing `.` would
+/// let a malicious or careless org_id shift the per-org subject filter
+/// (`{org_id}.*.ctl.>`) across tenant boundaries — e.g. an org named
+/// `acme.evil` would receive subjects published under `acme`'s namespace.
+/// This was flagged as a [BLOCKER] in the Peat QA Review on PR #102.
+///
+/// `*` and `>` are NATS wildcards and are excluded by the allow-list.
+/// Leading `_` is excluded by the alphanumeric-start rule, which also
+/// covers the reserved sentinel app_id `_org` used for org-level
+/// lifecycle events (see `src/ingress/mod.rs` and peat#842).
 fn validate_identifier(value: &str, field: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{field} must not be empty");
@@ -643,9 +655,9 @@ fn validate_identifier(value: &str, field: &str) -> Result<()> {
     }
     if !bytes
         .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
-        bail!("{field} contains invalid characters (allowed: a-zA-Z0-9._-)");
+        bail!("{field} contains invalid characters (allowed: a-zA-Z0-9_-)");
     }
     Ok(())
 }
@@ -1905,7 +1917,7 @@ mod tests {
     fn test_validate_identifier() {
         // Valid identifiers
         assert!(validate_identifier("acme", "test").is_ok());
-        assert!(validate_identifier("my-org.v2", "test").is_ok());
+        assert!(validate_identifier("my-org-v2", "test").is_ok());
         assert!(validate_identifier("A_123", "test").is_ok());
 
         // Invalid identifiers
@@ -1920,6 +1932,44 @@ mod tests {
         assert!(validate_identifier(&max, "test").is_ok());
         let over = "a".repeat(MAX_IDENTIFIER_LEN + 1);
         assert!(validate_identifier(&over, "test").is_err());
+    }
+
+    /// Regression coverage for the QA Review [BLOCKER] on PR #102.
+    /// Identifiers flow into NATS subject patterns in `src/ingress/mod.rs`
+    /// (`{org_id}.*.ctl.>`); any character that has structural meaning in
+    /// NATS subjects must be rejected here.
+    #[test]
+    fn test_validate_identifier_rejects_nats_subject_special_chars() {
+        // The headline leak path: org_id `acme.evil` would produce filter
+        // `acme.evil.*.ctl.>`, which would match subjects published by a
+        // *different* org `acme` with app `evil.foo`.
+        assert!(
+            validate_identifier("acme.evil", "org_id").is_err(),
+            "dot must be rejected — would shift NATS subject boundary across tenants"
+        );
+        // Embedded dots also forbidden — same risk class.
+        assert!(validate_identifier("acme.v2", "org_id").is_err());
+        assert!(validate_identifier("a.b.c", "org_id").is_err());
+
+        // NATS wildcards.
+        assert!(validate_identifier("acme*", "org_id").is_err());
+        assert!(validate_identifier("acme>", "org_id").is_err());
+        assert!(validate_identifier("a*b", "org_id").is_err());
+
+        // Whitespace and other control-ish chars (already covered by the
+        // allow-list, asserted explicitly to lock in the contract).
+        assert!(validate_identifier("acme\tevil", "org_id").is_err());
+        assert!(validate_identifier("acme\nevil", "org_id").is_err());
+
+        // Leading `_` — covers the `_org` reserved sentinel for org-level
+        // lifecycle events (src/ingress/mod.rs, peat#842). Already enforced
+        // by the alphanumeric-start rule but asserted here so the invariant
+        // can't silently regress if that rule ever loosens.
+        assert!(validate_identifier("_org", "app_id").is_err());
+        assert!(validate_identifier("_evil", "app_id").is_err());
+
+        // Internal underscores remain legal — common in real identifiers.
+        assert!(validate_identifier("acme_evil", "org_id").is_ok());
     }
 
     #[test]
