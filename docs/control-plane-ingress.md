@@ -116,11 +116,30 @@ mitigations:
    probabilistic — true correctness needs a coordinator pattern, tracked
    under [peat-gateway#92][gh-92].
 
+## Auto-driven subscription lifecycle
+
+ADR-055 Amendment A line 209 mandates "subscription lifecycle is bound to
+org/formation lifecycle". This is realized via the `TenantObserver` trait
+in `src/tenant/observer.rs`:
+
+- `IngressEngine` implements `TenantObserver` — `on_org_created` calls
+  `ensure_org_subscription`, `on_org_deleted` calls `remove_org_subscription`.
+- Production wiring calls `engine.register_with_tenants().await` once
+  after constructing the engine. After that, `tenants.create_org(...)` /
+  `tenants.delete_org(...)` automatically drive ingress lifecycle — no
+  caller needs to remember to invoke `ensure_org_subscription` themselves.
+- Hooks are best-effort: a failed `on_org_created` (e.g. NATS broker
+  unreachable) logs at warn-level and **does not roll back the tenant
+  op**. Operators retry by calling `ensure_org_subscription` directly.
+  Coupling tenant-control-plane availability to ingress broker
+  availability is the wrong tradeoff.
+- Tests opt in only when they want to exercise the auto-driven path; the
+  explicit API still works without registration.
+
 ## Open work
 
 | Item | Issue | Notes |
 |---|---|---|
-| TenantManager → IngressEngine observer wiring | not yet filed | the API layer or tests must invoke `ensure_org_subscription` themselves today |
 | Real handlers for peers / certs / idp events | [#99][gh-99] | Phase 3 (Identity Federation) |
 | DLQ for messages that exhaust `max_deliver` | [#108][gh-108] | exhausted messages currently dropped (logged) |
 | Broker-level account ACL test (multi-account CI fixture) | [#97][gh-97] | primary tenant-isolation boundary, currently unenforced |
