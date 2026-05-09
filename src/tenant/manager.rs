@@ -625,8 +625,24 @@ impl TenantManager {
 const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 1024;
 
+/// Identifiers reserved by the gateway for protocol-level use. These names
+/// must not be available as org_ids, app_ids, or any other tenant-supplied
+/// identifier that flows into a NATS subject.
+///
+///  - `_org` — sentinel app_id used by the control-plane ingress engine for
+///    org-level lifecycle events (e.g. `acme._org.ctl.formations.create`).
+///    See `src/ingress/mod.rs` and peat#842.
+///
+/// The alphanumeric-start rule in `validate_identifier` happens to reject
+/// `_org` already (since `_` is not alphanumeric), but that's a side effect
+/// of an unrelated rule — this list makes the reservation explicit so it
+/// can't silently lapse if the alphanumeric-start rule is ever loosened.
+/// Per the QA Review on PR #102 and tracked in #106.
+const RESERVED_SENTINEL_IDENTIFIERS: &[&str] = &["_org"];
+
 /// Validate an identifier field (org_id, app_id, etc.):
-/// must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` and be at most 128 characters.
+/// must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, be at most 128 characters, and
+/// not match any name in [`RESERVED_SENTINEL_IDENTIFIERS`].
 ///
 /// `.` is **rejected** because identifiers flow into NATS subject patterns
 /// in the control-plane ingress engine (peat-gateway#91). Allowing `.` would
@@ -636,9 +652,7 @@ const MAX_DISPLAY_NAME_LEN: usize = 1024;
 /// This was flagged as a [BLOCKER] in the Peat QA Review on PR #102.
 ///
 /// `*` and `>` are NATS wildcards and are excluded by the allow-list.
-/// Leading `_` is excluded by the alphanumeric-start rule, which also
-/// covers the reserved sentinel app_id `_org` used for org-level
-/// lifecycle events (see `src/ingress/mod.rs` and peat#842).
+/// Leading `_` is excluded by the alphanumeric-start rule.
 fn validate_identifier(value: &str, field: &str) -> Result<()> {
     if value.is_empty() {
         bail!("{field} must not be empty");
@@ -648,6 +662,12 @@ fn validate_identifier(value: &str, field: &str) -> Result<()> {
             "{field} exceeds maximum length ({} > {MAX_IDENTIFIER_LEN})",
             value.len()
         );
+    }
+    // Sentinel reservation runs before the character/start-byte rules so
+    // operators reading the error get a message that names the actual
+    // constraint, not an incidental one.
+    if RESERVED_SENTINEL_IDENTIFIERS.contains(&value) {
+        bail!("{field} '{value}' is reserved by the gateway and cannot be used");
     }
     let bytes = value.as_bytes();
     if !bytes[0].is_ascii_alphanumeric() {
@@ -914,6 +934,30 @@ mod tests {
         let fetched = mgr.get_formation("acme", "logistics").await.unwrap();
         assert_eq!(fetched.app_id, "logistics");
         assert_eq!(fetched.mesh_id, formation.mesh_id);
+    }
+
+    /// Regression coverage for #106 — `_org` is reserved by the
+    /// control-plane ingress subject schema and must be rejected at the
+    /// public formation-creation entry point, not just by the internal
+    /// validate_identifier helper.
+    #[tokio::test]
+    async fn test_create_formation_rejects_reserved_sentinel_app_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = make_manager(&dir);
+
+        mgr.create_org("acme".into(), "Acme Corp".into())
+            .await
+            .unwrap();
+
+        let err = mgr
+            .create_formation("acme", "_org".into(), EnrollmentPolicy::Open)
+            .await
+            .expect_err("reserved sentinel app_id must be rejected by create_formation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reserved"),
+            "create_formation error should name the reservation; got {msg:?}"
+        );
     }
 
     #[tokio::test]
@@ -1970,6 +2014,32 @@ mod tests {
 
         // Internal underscores remain legal — common in real identifiers.
         assert!(validate_identifier("acme_evil", "org_id").is_ok());
+    }
+
+    /// Regression coverage for #106 — explicit reservation of sentinel
+    /// identifiers (currently `_org`) used by the control-plane ingress
+    /// subject schema. The previous QA-Review-driven test asserts `_org`
+    /// is rejected via the alphanumeric-start side effect; this test
+    /// asserts the *named* reservation rule fires first, surfacing a
+    /// clear "is reserved" error message rather than the more generic
+    /// "must start with an alphanumeric character".
+    #[test]
+    fn test_validate_identifier_rejects_reserved_sentinels() {
+        for sentinel in RESERVED_SENTINEL_IDENTIFIERS {
+            let err = validate_identifier(sentinel, "app_id")
+                .expect_err("reserved sentinel must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("reserved"),
+                "error message for sentinel {sentinel:?} should name the reservation; got {msg:?}"
+            );
+        }
+
+        // Substring containment of a sentinel is fine — the reservation is
+        // exact-match. `_org_thing` would also fail (alphanumeric-start),
+        // but `acme_org` is legal because the sentinel is `_org`, not `org`.
+        assert!(validate_identifier("acme_org", "app_id").is_ok());
+        assert!(validate_identifier("org_admin", "app_id").is_ok());
     }
 
     #[test]
