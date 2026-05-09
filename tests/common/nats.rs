@@ -168,6 +168,39 @@ impl EventStream {
     }
 }
 
+// ── Broker round-trip sync barrier ──────────────────────────────
+
+/// Wait until the broker has processed every command queued before this
+/// call on `client`'s connection. After it returns, the broker has
+/// finished processing all preceding `subscribe` / `publish` calls on
+/// this client.
+///
+/// **Why `client.flush()` is not enough.** In `async_nats` 0.38,
+/// `Client::flush()` is a *local* flush — it polls `poll_flush` on the
+/// TCP write half so all locally-queued bytes hit the OS send buffer.
+/// It does **not** issue a PING/PONG, so it gives no guarantee that the
+/// broker has *processed* (let alone routed) any of those commands.
+/// `client.request()` does a real round-trip: the broker either replies
+/// or returns `NoResponders`; either way, by the time the future
+/// resolves, the broker has processed all earlier commands on our
+/// connection in order.
+///
+/// **Pattern.** After `client.subscribe(...).await`, call this helper
+/// before the SUB's first message can arrive — otherwise a competing
+/// PUB from a different client can race ahead and the broker routes
+/// the message to zero matching subscriptions (NATS core is at-most-
+/// once; missed messages are not redelivered). This is the actual race
+/// behind the `org_isolation_no_cross_delivery` flake — local 25-run
+/// hammer reproduced ~4%.
+pub async fn await_broker_roundtrip(client: &async_nats::Client) {
+    // Subject is intentionally not subscribed-to anywhere; the broker
+    // returns `NoResponders` immediately. We don't care about the
+    // result, only the round-trip.
+    let _ = client
+        .request("_test_sync_barrier", Default::default())
+        .await;
+}
+
 // ── JetStream helpers ───────────────────────────────────────────
 
 /// Get a JetStream context from a connected client. Cheap — a context is just
@@ -245,17 +278,19 @@ pub async fn publish_ctl<T: serde::Serialize>(
 
 /// Subscribe to a subject (or wildcard) and return a typed `EventStream`.
 ///
-/// Flushes after the SUB so the broker has processed the subscription before
-/// the caller publishes. Without this, NATS core (no JetStream) silently
-/// drops messages whose PUB lands before the SUB is registered server-side —
-/// this is undetectable locally where latency is microseconds, but races on
-/// CI where the client→service-container hop is slower.
+/// Forces a broker round-trip after the SUB so the broker has processed
+/// the subscription before the caller publishes. NATS core is at-most-
+/// once: a PUB that races ahead of an unprocessed SUB lands in zero
+/// matching subscriptions and is silently dropped — and `client.flush()`
+/// in `async_nats` 0.38 is a local socket flush only, NOT a server
+/// round-trip (see `await_broker_roundtrip`). The `request()` round-trip
+/// here is what makes `subscribe` deterministic.
 pub async fn subscribe(client: &async_nats::Client, subject: &str) -> EventStream {
     let sub = client
         .subscribe(subject.to_string())
         .await
         .expect("subscribe failed");
-    client.flush().await.expect("flush after subscribe failed");
+    await_broker_roundtrip(client).await;
     EventStream { sub }
 }
 

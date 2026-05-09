@@ -12,7 +12,8 @@ use serde_json::json;
 
 mod common;
 use common::nats::{
-    make_event, nats_url, subscribe, try_client, try_client_at, BrokerProxy, Harness,
+    await_broker_roundtrip, make_event, nats_url, subscribe, try_client, try_client_at,
+    BrokerProxy, Harness,
 };
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -48,9 +49,10 @@ async fn publish_event_arrives_on_nats_subject() {
 
     let event = make_event("acme", "logistics", "doc-001", "abc123deadbeef");
     h.engine.publish(&event).await.unwrap();
+    await_broker_roundtrip(&client).await;
 
     let msg = stream
-        .next_message(Duration::from_secs(5))
+        .next_message(Duration::from_secs(1))
         .await
         .expect("subscription closed unexpectedly");
 
@@ -110,8 +112,13 @@ async fn disabled_sink_does_not_publish() {
         .publish(&make_event("acme", "logistics", "doc-skip", "hash-skip"))
         .await
         .unwrap();
+    await_broker_roundtrip(&client).await;
 
-    stream.assert_silent(Duration::from_millis(500)).await;
+    // Tight bound: after the subscriber's flush, no further message can
+    // arrive without the broker first pushing it (which would mean the
+    // disabled-sink invariant was violated). 100ms is enough to
+    // distinguish "message buffered" from "message did not arrive".
+    stream.assert_silent(Duration::from_millis(100)).await;
 }
 
 #[tokio::test]
@@ -158,13 +165,14 @@ async fn multiple_sinks_fan_out() {
     event.actor_id = "peer-1".into();
     event.patches = json!({"changed": true});
     h.engine.publish(&event).await.unwrap();
+    await_broker_roundtrip(&client).await;
 
     let ev_a = stream_a
-        .next_event(Duration::from_secs(5))
+        .next_event(Duration::from_secs(1))
         .await
         .expect("sink-a closed");
     let ev_b = stream_b
-        .next_event(Duration::from_secs(5))
+        .next_event(Duration::from_secs(1))
         .await
         .expect("sink-b closed");
     assert_eq!(ev_a.document_id, "doc-fanout");
@@ -204,14 +212,15 @@ async fn org_isolation_no_cross_delivery() {
     event.actor_id = "peer-a".into();
     event.patches = json!(null);
     h.engine.publish(&event).await.unwrap();
+    await_broker_roundtrip(&client).await;
 
     let received = stream_alpha
-        .next_event(Duration::from_secs(5))
+        .next_event(Duration::from_secs(1))
         .await
         .expect("alpha closed");
     assert_eq!(received.org_id, "alpha");
 
-    stream_bravo.assert_silent(Duration::from_millis(500)).await;
+    stream_bravo.assert_silent(Duration::from_millis(100)).await;
 }
 
 /// Reconnect / backoff under broker churn.
