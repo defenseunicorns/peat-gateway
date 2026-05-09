@@ -93,7 +93,7 @@ Sinks can be added or removed via the admin API without restarting the gateway. 
 
 ## Functional Test Harness (NATS)
 
-NATS sink tests run against a **live broker**, not a mock. CI runs `nats:latest --jetstream` in the `nats-integration` job; locally, run `nats-server --jetstream` (or `docker run -p 4222:4222 nats:latest --jetstream`) and `cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests`. JetStream is required because peat-gateway#91 introduces a control-plane ingress subscriber that uses durable JetStream consumers (per ADR-055 Amendment A); the sink-side tests don't need it but enabling it is harmless. The test files probe the broker on startup and skip cleanly when it's unreachable, so default-feature CI is unaffected.
+NATS sink tests run against a **live broker**, not a mock. CI runs `nats:2.14.0 --jetstream` in the `nats-integration` job (pinned per peat-gateway#101 — bumps are explicit PRs); locally, match the CI image with `docker run -p 4222:4222 nats:2.14.0 --jetstream` (or run `nats-server --jetstream` if you have it installed) and `cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests`. JetStream is required because peat-gateway#91 introduces a control-plane ingress subscriber that uses durable JetStream consumers (per ADR-055 Amendment A); the sink-side tests don't need it but enabling it is harmless. The test files probe the broker on startup and skip cleanly when it's unreachable, so default-feature CI is unaffected.
 
 The reusable harness lives in [`tests/common/nats.rs`](../tests/common/nats.rs). It is intentionally usable from both publish-side tests (today) and ingress-side tests (future full-duplex work) without churn.
 
