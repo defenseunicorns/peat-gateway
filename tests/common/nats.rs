@@ -158,11 +158,18 @@ impl EventStream {
 }
 
 /// Subscribe to a subject (or wildcard) and return a typed `EventStream`.
+///
+/// Flushes after the SUB so the broker has processed the subscription before
+/// the caller publishes. Without this, NATS core (no JetStream) silently
+/// drops messages whose PUB lands before the SUB is registered server-side —
+/// this is undetectable locally where latency is microseconds, but races on
+/// CI where the client→service-container hop is slower.
 pub async fn subscribe(client: &async_nats::Client, subject: &str) -> EventStream {
     let sub = client
         .subscribe(subject.to_string())
         .await
         .expect("subscribe failed");
+    client.flush().await.expect("flush after subscribe failed");
     EventStream { sub }
 }
 
