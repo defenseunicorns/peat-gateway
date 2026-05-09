@@ -432,3 +432,65 @@ async fn poison_pill_redelivers_at_most_max_deliver_times() {
 
     delete_stream(&js, &stream_name).await;
 }
+
+// ── TOCTOU mitigation (#105) ─────────────────────────────────────
+
+#[tokio::test]
+async fn concurrent_ensure_org_subscription_lands_every_org() {
+    // Hardening from #105 / QA Review on PR #102: without the
+    // process-local stream_lock, parallel ensure_org_subscription calls
+    // can each read the same baseline stream config and each push a
+    // divergent update — last-writer-wins drops the loser's addition.
+    // This test fires N concurrent ensures and asserts every org's
+    // subject ends up in the final stream config.
+
+    let stream_name = unique_stream("concurrent");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    const N: usize = 10;
+    let orgs: Vec<String> = (0..N).map(|i| unique_org(&format!("acme{i}"))).collect();
+
+    let mut handles = Vec::with_capacity(N);
+    for org in &orgs {
+        let engine = engine.clone();
+        let org = org.clone();
+        handles.push(tokio::spawn(async move {
+            engine.ensure_org_subscription(&org).await
+        }));
+    }
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    let subjects: Vec<String> = js
+        .get_stream(&stream_name)
+        .await
+        .expect("stream missing after concurrent ensures")
+        .cached_info()
+        .config
+        .subjects
+        .clone();
+
+    for org in &orgs {
+        let target = format!("{org}.*.ctl.>");
+        assert!(
+            subjects.contains(&target),
+            "missing subject {target} after {N} concurrent ensure_org_subscription calls; \
+             subjects={subjects:?}"
+        );
+    }
+    // Every org also has a registered consumer.
+    for org in &orgs {
+        assert!(
+            engine.consumer_for_org(org).await.is_some(),
+            "consumer registry missing entry for {org}"
+        );
+    }
+
+    delete_stream(&js, &stream_name).await;
+}

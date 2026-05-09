@@ -85,6 +85,37 @@ const CONSUMER_MAX_DELIVER: i64 = 5;
 const CONSUMER_ACK_WAIT: Duration = Duration::from_secs(30);
 const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
 
+// ── Stream-config TOCTOU mitigation ────────────────────────────
+//
+// `ensure_stream_includes` and `ensure_stream_excludes` follow a
+// read-merge-update pattern (fetch existing subjects → mutate locally →
+// `update_stream`). Two concurrent calls can each read the same baseline
+// and each push divergent updates — last-writer-wins drops the loser's
+// addition (or resurrects an already-removed subject). Per QA Review on
+// PR #102 / tracked in #105.
+//
+// Two layers of mitigation:
+//
+//  1. Process-local mutex on `Inner::stream_lock` serializes the
+//     entire read-merge-update on a single engine instance. Holding the
+//     mutex through `update_stream`'s round-trip means concurrent
+//     `ensure_org_subscription` / `remove_org_subscription` calls within
+//     this gateway never race each other.
+//
+//  2. Best-effort retry on `update_stream` errors. JetStream's stream
+//     config has no built-in CAS / revision token, so we can't
+//     deterministically detect a cross-instance conflict — but on any
+//     `update_stream` error we re-fetch, re-merge, and retry up to
+//     STREAM_UPDATE_MAX_RETRIES. This catches transient broker errors
+//     and (probabilistically) cross-instance conflicts where the broker
+//     surfaced an error rather than silently last-writer-wins'd.
+//
+// True cross-instance correctness in HA deployments would need either a
+// JetStream feature change or a coordinator pattern (e.g. one writer
+// instance per stream). Tracked under #92 (NATS hardening) and noted as
+// a remaining limitation in #105.
+const STREAM_UPDATE_MAX_RETRIES: u32 = 3;
+
 use crate::config::{GatewayConfig, NatsIngressConfig};
 use crate::tenant::TenantManager;
 
@@ -105,6 +136,12 @@ struct Inner {
     js: jetstream::Context,
     config: NatsIngressConfig,
     consumers: Arc<Mutex<HashMap<String, IngressConsumer>>>,
+    /// Serializes stream-config mutations (`update_stream` /
+    /// `create_stream` / `delete_stream`) so concurrent
+    /// `ensure_org_subscription` / `remove_org_subscription` calls on
+    /// this engine instance can't TOCTOU each other. See module-level
+    /// comment block on TOCTOU mitigation.
+    stream_lock: Arc<Mutex<()>>,
 }
 
 impl IngressEngine {
@@ -140,6 +177,7 @@ impl IngressEngine {
                 js,
                 config: nats_cfg,
                 consumers: Arc::new(Mutex::new(HashMap::new())),
+                stream_lock: Arc::new(Mutex::new(())),
             }),
             tenants,
         })
@@ -175,6 +213,11 @@ impl IngressEngine {
         };
 
         let org_subjects = vec![format!("{org_id}.*.ctl.>")];
+
+        // Hold the stream lock through the read-merge-update path AND the
+        // subsequent get_stream so a concurrent remove_org_subscription
+        // can't drain the stream out from under us between the two calls.
+        let _stream_guard = inner.stream_lock.lock().await;
         ensure_stream_includes(&inner.js, &inner.config.stream_name, &org_subjects).await?;
 
         let durable = consumer_name(&inner.config.consumer_prefix, org_id);
@@ -232,6 +275,11 @@ impl IngressEngine {
 
         let durable = consumer_name(&inner.config.consumer_prefix, org_id);
         inner.consumers.lock().await.remove(org_id);
+
+        // Hold the stream lock across delete_consumer + the
+        // ensure_stream_excludes call so a concurrent ensure_org_subscription
+        // can't race the subject removal.
+        let _stream_guard = inner.stream_lock.lock().await;
 
         // delete_consumer returns NotFound for already-removed consumers;
         // log and swallow so this stays idempotent.
@@ -303,7 +351,39 @@ fn deliver_group(prefix: &str, org_id: &str) -> String {
 /// Idempotently grow the stream's subject list. Creates the stream if it
 /// doesn't exist; updates if it does. Returns the (post-update) subject
 /// set as held by the broker.
+///
+/// Wrapped in [`STREAM_UPDATE_MAX_RETRIES`] best-effort retries: between
+/// our `get_stream` and `update_stream`, another process may have updated
+/// the stream config. Most retryable failures here are transient broker
+/// errors; the retry loop also gives a probabilistic recovery from
+/// cross-instance update conflicts (true CAS isn't available — see the
+/// TOCTOU module-level comment block).
 async fn ensure_stream_includes(
+    js: &jetstream::Context,
+    name: &str,
+    additions: &[String],
+) -> Result<Vec<String>> {
+    let mut last_err = None;
+    for attempt in 0..STREAM_UPDATE_MAX_RETRIES {
+        match try_ensure_stream_includes(js, name, additions).await {
+            Ok(subjects) => return Ok(subjects),
+            Err(e) => {
+                if attempt + 1 < STREAM_UPDATE_MAX_RETRIES {
+                    warn!(
+                        stream = name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "ensure_stream_includes retrying after transient failure"
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop must record at least one error before exhausting"))
+}
+
+async fn try_ensure_stream_includes(
     js: &jetstream::Context,
     name: &str,
     additions: &[String],
@@ -346,7 +426,34 @@ async fn ensure_stream_includes(
 /// gone or already lacks the targets. If removing the targets would empty
 /// the subject list, the stream is deleted entirely (a stream cannot have
 /// zero subjects per JetStream invariants).
+///
+/// Same retry shape as `ensure_stream_includes`.
 async fn ensure_stream_excludes(
+    js: &jetstream::Context,
+    name: &str,
+    removals: &[String],
+) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 0..STREAM_UPDATE_MAX_RETRIES {
+        match try_ensure_stream_excludes(js, name, removals).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt + 1 < STREAM_UPDATE_MAX_RETRIES {
+                    warn!(
+                        stream = name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "ensure_stream_excludes retrying after transient failure"
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop must record at least one error before exhausting"))
+}
+
+async fn try_ensure_stream_excludes(
     js: &jetstream::Context,
     name: &str,
     removals: &[String],
