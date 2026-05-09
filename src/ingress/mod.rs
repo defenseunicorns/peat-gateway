@@ -44,11 +44,15 @@
 //!    the real engine), formations CRUD wired end-to-end, peers / certs /
 //!    idp handlers stubbed pending #99.
 //!
+//!  - **Step 4b** — `IngressEngine` implements `TenantObserver`; calling
+//!    `register_with_tenants` once after construction wires
+//!    `tenants.create_org` / `delete_org` to automatically drive the
+//!    per-org subscription lifecycle (ADR-055 Amendment A line 209).
+//!    Hooks are best-effort: failures log at warn-level without rolling
+//!    back the tenant op.
+//!
 //! Still deferred for follow-up:
 //!  - DLQ for messages that exhaust `max_deliver` — #108.
-//!  - TenantManager → IngressEngine observer wiring so consumer lifecycle
-//!    is driven automatically by org lifecycle (today the API layer or
-//!    tests must invoke `ensure_org_subscription` themselves).
 
 #![cfg(feature = "nats")]
 
@@ -137,7 +141,9 @@ const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
 const STREAM_UPDATE_MAX_RETRIES: u32 = 3;
 
 use crate::config::{GatewayConfig, NatsIngressConfig};
-use crate::tenant::TenantManager;
+use crate::tenant::{TenantManager, TenantObserver};
+
+use async_trait::async_trait;
 
 /// Push-consumer alias to keep call-site types readable.
 pub type IngressConsumer = Consumer<push::Config>;
@@ -240,6 +246,28 @@ impl IngressEngine {
     /// effects and by the API layer when wiring observers.
     pub fn tenants(&self) -> &TenantManager {
         &self.tenants
+    }
+
+    /// Register this engine as a `TenantObserver` on its associated
+    /// `TenantManager` so org create/delete drives the ingress
+    /// subscription lifecycle automatically (ADR-055 Amendment A line
+    /// 209). No-op when ingress is disabled.
+    ///
+    /// Production wiring calls this once after `IngressEngine::new`.
+    /// Tests opt in only when they want to exercise the auto-driven
+    /// path; the explicit `ensure_org_subscription` /
+    /// `remove_org_subscription` API still works without registration.
+    ///
+    /// Creates a strong-Arc cycle through `TenantManager.observers`.
+    /// Tests that build and discard engines should call
+    /// `tenants().clear_observers()` to break the cycle and let memory
+    /// reclaim — see the doc comment on `TenantManager.observers`.
+    pub async fn register_with_tenants(&self) {
+        if !self.is_enabled() {
+            return;
+        }
+        let observer: Arc<dyn TenantObserver> = Arc::new(self.clone());
+        self.tenants.register_observer(observer).await;
     }
 
     /// Returns the configured stream name when ingress is enabled.
@@ -425,6 +453,25 @@ fn deliver_subject(prefix: &str, org_id: &str) -> String {
 /// duplicate of every event and JetStream's ack tracking races between them.
 fn deliver_group(prefix: &str, org_id: &str) -> String {
     format!("{prefix}-{org_id}")
+}
+
+// ── TenantObserver impl ──────────────────────────────────────────────
+//
+// Bridges org-lifecycle mutations on `TenantManager` to ingress
+// subscription lifecycle. Registered via `IngressEngine::register_with_tenants`.
+// Failures are surfaced back to `TenantManager`'s notify_*, which logs them
+// at warn-level and continues — the tenant op already succeeded by the time
+// the hook runs.
+
+#[async_trait]
+impl TenantObserver for IngressEngine {
+    async fn on_org_created(&self, org_id: &str) -> Result<()> {
+        self.ensure_org_subscription(org_id).await
+    }
+
+    async fn on_org_deleted(&self, org_id: &str) -> Result<()> {
+        self.remove_org_subscription(org_id).await
+    }
 }
 
 /// Idempotently grow the stream's subject list. Creates the stream if it

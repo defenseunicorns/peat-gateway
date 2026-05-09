@@ -704,3 +704,107 @@ async fn stub_handler_acks_without_mutating_state() {
 
     delete_stream(&js, &stream_name).await;
 }
+
+// ── Step 4b: TenantObserver auto-registration ────────────────────
+
+#[tokio::test]
+async fn registered_engine_auto_creates_subscription_on_create_org() {
+    // With the engine registered as a TenantObserver, calling
+    // tenants.create_org should automatically wire the per-org ingress
+    // subscription — no explicit ensure_org_subscription call needed.
+    let stream_name = unique_stream("observer-create");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    engine.register_with_tenants().await;
+
+    let org = unique_org("acme");
+    engine
+        .tenants()
+        .create_org(org.clone(), "Acme".into())
+        .await
+        .unwrap();
+
+    // Consumer should be in the registry without our calling
+    // ensure_org_subscription.
+    assert!(
+        engine.consumer_for_org(&org).await.is_some(),
+        "observer hook should have auto-created the consumer"
+    );
+    let subjects: Vec<String> = js
+        .get_stream(&stream_name)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .subjects
+        .clone();
+    assert!(
+        subjects.contains(&format!("{org}.*.ctl.>")),
+        "stream should carry the org's subject after auto-registration"
+    );
+
+    engine.tenants().clear_observers().await;
+    delete_stream(&js, &stream_name).await;
+}
+
+#[tokio::test]
+async fn registered_engine_auto_removes_subscription_on_delete_org() {
+    let stream_name = unique_stream("observer-delete");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    engine.register_with_tenants().await;
+
+    let org = unique_org("acme");
+    engine
+        .tenants()
+        .create_org(org.clone(), "Acme".into())
+        .await
+        .unwrap();
+    assert!(engine.consumer_for_org(&org).await.is_some());
+
+    engine.tenants().delete_org(&org).await.unwrap();
+
+    assert!(
+        engine.consumer_for_org(&org).await.is_none(),
+        "observer hook should have torn down the consumer"
+    );
+
+    engine.tenants().clear_observers().await;
+    delete_stream(&js, &stream_name).await;
+}
+
+#[tokio::test]
+async fn unregistered_engine_does_not_auto_react() {
+    // The flip side: without register_with_tenants, the explicit
+    // ensure_org_subscription / remove_org_subscription API still works
+    // and tenant ops do NOT touch ingress state. Pins the opt-in
+    // contract so future refactors that auto-register everywhere are
+    // surfaced as test failures.
+    let stream_name = unique_stream("observer-opt-in");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    // Note: NOT calling register_with_tenants.
+
+    let org = unique_org("acme");
+    engine
+        .tenants()
+        .create_org(org.clone(), "Acme".into())
+        .await
+        .unwrap();
+
+    assert!(
+        engine.consumer_for_org(&org).await.is_none(),
+        "without registration, create_org must not touch ingress state"
+    );
+}

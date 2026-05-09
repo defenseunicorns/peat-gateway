@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use peat_mesh::security::{MembershipPolicy, MeshGenesis};
-use tracing::info;
+use tokio::sync::RwLock;
+use tracing::{info, warn};
 
 use super::models::{
     CdcSinkConfig, CdcSinkType, EnrollmentAuditEntry, EnrollmentToken, FormationConfig, IdpConfig,
     OrgQuotas, Organization, PolicyRule,
 };
+use super::observer::TenantObserver;
 use crate::config::GatewayConfig;
 use crate::crypto::{self, KeyProvider};
 use crate::storage::{self, StorageBackend};
@@ -17,6 +19,17 @@ pub struct TenantManager {
     store: Arc<dyn StorageBackend>,
     key_provider: Arc<dyn KeyProvider>,
     encrypt_enabled: bool,
+    /// Observers notified after successful org-lifecycle mutations.
+    /// Held as strong `Arc`s; observer hooks are best-effort and never
+    /// roll back the underlying tenant op (see `observer.rs`).
+    ///
+    /// **Lifetime caveat.** An observer (e.g. `IngressEngine`) typically
+    /// holds a `TenantManager` clone, creating a cyclic strong-ref graph
+    /// once registered. The cycle is harmless for the gateway's typical
+    /// long-lived process — both ends drop together at shutdown. Tests
+    /// that build and discard engines mid-process should call
+    /// `clear_observers` to break the cycle and let memory reclaim.
+    observers: Arc<RwLock<Vec<Arc<dyn TenantObserver>>>>,
 }
 
 impl TenantManager {
@@ -33,6 +46,7 @@ impl TenantManager {
             store,
             key_provider,
             encrypt_enabled,
+            observers: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -46,6 +60,7 @@ impl TenantManager {
             store,
             key_provider,
             encrypt_enabled,
+            observers: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -65,7 +80,52 @@ impl TenantManager {
             store,
             key_provider,
             encrypt_enabled,
+            observers: Arc::new(RwLock::new(Vec::new())),
         })
+    }
+
+    // --- Observer registration ---
+
+    /// Register an observer to receive org-lifecycle hook calls. Hooks
+    /// fire after the corresponding tenant op succeeds; hook errors are
+    /// logged at warn-level and do not affect the tenant op's return
+    /// value. See `tenant::observer` module docs for failure semantics
+    /// and the lifetime caveat.
+    pub async fn register_observer(&self, observer: Arc<dyn TenantObserver>) {
+        self.observers.write().await.push(observer);
+    }
+
+    /// Drop all registered observers. Tests that build and discard
+    /// engines mid-process call this to break the strong-Arc cycle
+    /// described on the `observers` field.
+    pub async fn clear_observers(&self) {
+        self.observers.write().await.clear();
+    }
+
+    async fn notify_org_created(&self, org_id: &str) {
+        let observers = self.observers.read().await;
+        for obs in observers.iter() {
+            if let Err(e) = obs.on_org_created(org_id).await {
+                warn!(
+                    org_id = org_id,
+                    error = %e,
+                    "TenantObserver.on_org_created failed (continuing — observer hooks are best-effort)"
+                );
+            }
+        }
+    }
+
+    async fn notify_org_deleted(&self, org_id: &str) {
+        let observers = self.observers.read().await;
+        for obs in observers.iter() {
+            if let Err(e) = obs.on_org_deleted(org_id).await {
+                warn!(
+                    org_id = org_id,
+                    error = %e,
+                    "TenantObserver.on_org_deleted failed (continuing — observer hooks are best-effort)"
+                );
+            }
+        }
     }
 
     // --- Organizations ---
@@ -92,6 +152,7 @@ impl TenantManager {
 
         self.store.create_org(&org).await?;
         info!(org_id = %org_id, "Created organization");
+        self.notify_org_created(&org_id).await;
         Ok(org)
     }
 
@@ -131,6 +192,7 @@ impl TenantManager {
             bail!("Organization '{}' not found", org_id);
         }
         info!(org_id = %org_id, "Deleted organization");
+        self.notify_org_deleted(org_id).await;
         Ok(())
     }
 
