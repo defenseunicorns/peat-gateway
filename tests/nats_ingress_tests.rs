@@ -362,3 +362,73 @@ async fn per_org_consumer_only_receives_its_own_subjects() {
 
     delete_stream(&js, &stream_name).await;
 }
+
+// ── Consumer config hardening (#104) ─────────────────────────────
+
+#[tokio::test]
+async fn poison_pill_redelivers_at_most_max_deliver_times() {
+    // Hardening from #104 / QA Review on PR #102: a malformed/unhandleable
+    // control-plane message must not head-of-line block the consumer
+    // forever. The push consumer config sets `max_deliver = 5`, so a
+    // payload that's nack'd repeatedly stops being redelivered after that.
+
+    let stream_name = unique_stream("poison");
+    let Some((engine, _dir)) = build_engine(&stream_name).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    let org = unique_org("acme");
+    engine.ensure_org_subscription(&org).await.unwrap();
+
+    // Publish exactly one message — every "delivery" we count is a
+    // redelivery of this same payload.
+    let subject = format!("{org}._org.ctl.formations.create");
+    publish_ctl(
+        &js,
+        &subject,
+        &StubCtlEvent {
+            org_id: org.clone(),
+            kind: "formations.create".into(),
+            nonce: 1,
+        },
+    )
+    .await;
+
+    let consumer = engine.consumer_for_org(&org).await.unwrap();
+    let mut messages = consumer.messages().await.unwrap();
+
+    // Cross-references CONSUMER_MAX_DELIVER in src/ingress/mod.rs; a
+    // change to that constant should flip this expectation in lockstep.
+    const EXPECTED_MAX_DELIVER: usize = 5;
+
+    let mut deliveries = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), messages.next()).await {
+            Ok(Some(Ok(msg))) => {
+                deliveries += 1;
+                msg.ack_with(async_nats::jetstream::AckKind::Nak(Some(
+                    Duration::from_millis(0),
+                )))
+                .await
+                .unwrap();
+                if deliveries > EXPECTED_MAX_DELIVER {
+                    // Already over budget; the assertion below will fail.
+                    break;
+                }
+            }
+            // Timeout or stream end → broker has stopped redelivering.
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        deliveries, EXPECTED_MAX_DELIVER,
+        "poison-pill should redeliver exactly CONSUMER_MAX_DELIVER times before giving up"
+    );
+
+    delete_stream(&js, &stream_name).await;
+}
