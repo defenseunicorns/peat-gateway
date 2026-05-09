@@ -42,6 +42,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream::{
@@ -50,6 +51,36 @@ use async_nats::jetstream::{
 };
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+// ── Consumer config defaults ────────────────────────────────────
+//
+// Per-org JetStream push consumers are configured explicitly rather than
+// inheriting `Default::default()` because the JS defaults are unsafe for
+// control-plane workloads:
+//
+//  - `max_deliver = -1` (infinite redelivery): a single poison-pill
+//    payload would head-of-line block the consumer forever, starving
+//    every subsequent control-plane event for the same org. Bound it
+//    so dispatch failures surface and downstream tooling can drain.
+//
+//  - `ack_wait = 30s`: kept at the default but pinned explicitly so it
+//    can't drift if upstream changes the default.
+//
+//  - `max_ack_pending = 1024`: caps in-flight unacked messages per
+//    consumer, providing back-pressure when handlers stall.
+//
+// `deliver_group` (queue group) is set per-org so multiple gateway
+// instances load-balance instead of each receiving a duplicate copy of
+// every control-plane event — a head-of-line and ack-tracking hazard
+// flagged in the QA Review on PR #102. Migration to pull consumers
+// (which give natural cross-instance fan-in) is tracked under #92.
+//
+// DLQ for messages that exhaust `max_deliver` is deferred to a separate
+// follow-up — without one, exhausted messages are dropped after
+// max_deliver attempts (still better than infinite-loop starvation).
+const CONSUMER_MAX_DELIVER: i64 = 5;
+const CONSUMER_ACK_WAIT: Duration = Duration::from_secs(30);
+const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
 
 use crate::config::{GatewayConfig, NatsIngressConfig};
 use crate::tenant::TenantManager;
@@ -161,7 +192,11 @@ impl IngressEngine {
                 push::Config {
                     durable_name: Some(durable.clone()),
                     deliver_subject: deliver_subject(&inner.config.consumer_prefix, org_id),
+                    deliver_group: Some(deliver_group(&inner.config.consumer_prefix, org_id)),
                     filter_subjects: org_subjects.clone(),
+                    max_deliver: CONSUMER_MAX_DELIVER,
+                    ack_wait: CONSUMER_ACK_WAIT,
+                    max_ack_pending: CONSUMER_MAX_ACK_PENDING,
                     ..Default::default()
                 },
             )
@@ -253,6 +288,13 @@ fn consumer_name(prefix: &str, org_id: &str) -> String {
 /// share a delivery channel.
 fn deliver_subject(prefix: &str, org_id: &str) -> String {
     format!("_DELIVER.{prefix}.{org_id}")
+}
+
+/// Queue group for the push consumer. Multiple gateway instances bound to
+/// the same group share delivery — without this, every instance receives a
+/// duplicate of every event and JetStream's ack tracking races between them.
+fn deliver_group(prefix: &str, org_id: &str) -> String {
+    format!("{prefix}-{org_id}")
 }
 
 /// Idempotently grow the stream's subject list. Creates the stream if it
