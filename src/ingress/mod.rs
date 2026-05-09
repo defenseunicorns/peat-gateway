@@ -9,6 +9,9 @@
 //!    `acme.logistics.ctl.peers.enroll`) and org-level lifecycle events,
 //!    which use a **reserved sentinel app_id `_org`**:
 //!    `{org}._org.ctl.>` (e.g. `acme._org.ctl.formations.create`).
+//!    The reservation is enforced by `RESERVED_SENTINEL_IDENTIFIERS` in
+//!    `src/tenant/manager.rs` (peat-gateway#106) — `create_formation`
+//!    rejects an `app_id` of `_org` with a "reserved" error.
 //!    The original Amendment A pair (`{org}.ctl.>` + `{org}.{app}.ctl.>`)
 //!    overlaps at the JetStream pattern layer (`acme.ctl.ctl.foo` matches
 //!    both) and is rejected by the broker.
