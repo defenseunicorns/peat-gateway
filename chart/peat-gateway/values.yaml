@@ -43,6 +43,31 @@ cdc:
     # Kafka broker list (empty = Kafka sink disabled)
     brokers: ""
 
+# -- Control-plane ingress configuration (peat-gateway#91; ADR-055 Amendment A+B).
+# When `nats.url` is empty, the gateway does not subscribe to any control-plane
+# subjects. When set, the gateway opens JetStream durable consumers per org
+# under `{org}.*.ctl.>` (per-formation events) and the reserved `_org` sentinel
+# app_id for org-level lifecycle events. The subscriber connection is
+# gateway-initiated over the existing outbound NATS path — no separate
+# NetworkPolicy ingress rule is required.
+#
+# IMPORTANT: handlers for peers / certificates / idp events are stubs in #91
+# Step 4 (logged + acked, no state mutation) pending Phase-3 IDAM work in #99.
+# Do not enable ingress for those use cases until #99 ships, or published
+# events will be silently dropped. See docs/control-plane-ingress.md.
+ingress:
+  nats:
+    # NATS server URL (empty = control-plane ingress disabled). Typically the
+    # same broker the CDC sink publishes to; the gateway uses one underlying
+    # connection.
+    url: ""
+    # JetStream stream name covering all per-org control-plane subjects.
+    streamName: peat-gw-ctl
+    # Per-org durable consumer name prefix; the actual consumer name is
+    # `{consumerPrefix}-{org_id}`, stable across restarts so the cursor
+    # replays cleanly.
+    consumerPrefix: peat-gw
+
 # -- Prometheus metrics
 metrics:
   enabled: true

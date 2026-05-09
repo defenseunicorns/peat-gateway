@@ -31,14 +31,17 @@ spec:
           app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
         port: 11205
         description: "Peer enrollment protocol"
-      {{- if .Values.cdc.nats.url }}
-      # NATS CDC sink
+      {{- if or .Values.cdc.nats.url .Values.ingress.nats.url }}
+      # NATS port 4222 — covers CDC egress and / or control-plane ingress
+      # subscription. The ingress subscriber connection is gateway-initiated
+      # over the same outbound path (ADR-055 Amendment A line 216), so a
+      # single Egress rule serves both directions.
       - direction: Egress
         selector:
           app.kubernetes.io/name: {{ include "peat-gateway.name" . }}
         remoteNamespace: nats
         port: 4222
-        description: "CDC events to NATS"
+        description: "NATS CDC + control-plane ingress (gateway-initiated)"
       {{- end }}
       {{- if .Values.cdc.kafka.brokers }}
       # Kafka CDC sink

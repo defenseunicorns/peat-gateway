@@ -66,6 +66,14 @@ spec:
             - name: PEAT_CDC_KAFKA_BROKERS
               value: {{ .Values.cdc.kafka.brokers | quote }}
             {{- end }}
+            {{- if .Values.ingress.nats.url }}
+            - name: PEAT_INGRESS_NATS_URL
+              value: {{ .Values.ingress.nats.url | quote }}
+            - name: PEAT_INGRESS_STREAM_NAME
+              value: {{ .Values.ingress.nats.streamName | quote }}
+            - name: PEAT_INGRESS_CONSUMER_PREFIX
+              value: {{ .Values.ingress.nats.consumerPrefix | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080
