@@ -43,8 +43,18 @@ The seven initial event classes (typed in `src/ingress/events.rs`):
 | `{org}.{app}.ctl.peers.revoke.request` | Formation | stub (Phase 3 / [#99][gh-99]) |
 | `{org}.{app}.ctl.certificates.revoke.request` | Formation | stub (Phase 3 / [#99][gh-99]) |
 
-Stub handlers ack the message and emit a structured log entry — they don't
-produce errors and don't trigger the JetStream redelivery / DLQ path.
+> **⚠ DEPLOYMENT WARNING — stub handlers ack-and-drop.** Every event marked
+> "stub" above is **silently discarded** today. The handler deserializes the
+> payload, emits a single `info!` log line, and returns success — which acks
+> the JetStream message. Publishers see only the broker's publish-ack and
+> have no signal that the request was a no-op.
+>
+> **Do not enable ingress for the peers / certificates / idp use cases
+> until [#99][gh-99] ships.** Today only the formations event class
+> (`*.formations.create` / `*.formations.destroy`) actually mutates state.
+> Enabling ingress for the other classes will silently swallow control-plane
+> requests in production and look like the publisher / orchestrator is
+> misconfigured.
 
 ## Tenant isolation
 

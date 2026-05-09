@@ -206,6 +206,17 @@ impl IngressEngine {
         let dispatcher = Arc::new(Dispatcher::default_for(tenants.clone()));
         let authz: Arc<dyn handlers::AuthzCheck> = Arc::new(PermissiveAuthz);
 
+        // Surface the permissive-stub AuthZ at boot so operators see the
+        // posture without having to read every per-message info-level
+        // audit line. The real engine is Phase 3 (peat-gateway#99); the
+        // primary tenant boundary today is the broker-level account ACL
+        // tracked in peat-gateway#97. Both are required for production.
+        warn!(
+            "Control-plane ingress AuthZ is the PERMISSIVE STUB — every event is allowed. \
+             Production requires peat-gateway#99 (real policy engine) and peat-gateway#97 \
+             (broker-level account ACLs)."
+        );
+
         Ok(Self {
             inner: Some(Inner {
                 js,
