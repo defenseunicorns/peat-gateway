@@ -92,6 +92,24 @@ Three layers, ordered from primary to defence-in-depth:
   `PEAT_INGRESS_CONSUMER_PREFIX`. **Ingress is disabled by default**
   (existing deployments are unchanged unless they explicitly opt in).
 
+### Helm chart values
+
+The chart exposes the same surface under `ingress.nats` (peat-gateway#98):
+
+```yaml
+ingress:
+  nats:
+    url: ""                    # empty = ingress disabled (default)
+    streamName: peat-gw-ctl    # JetStream stream name
+    consumerPrefix: peat-gw    # per-org consumer name prefix
+```
+
+When `ingress.nats.url` is set, the chart emits the three
+`PEAT_INGRESS_*` env vars on the gateway Deployment. The UDS Package CR's
+NATS port-4222 NetworkPolicy rule is a single egress rule that covers
+both CDC egress and the gateway-initiated ingress subscription — no
+separate ingress NetworkPolicy is required.
+
 ## AuthZ Proxy
 
 ADR-055 Amendment A line 212 mandates that every state-changing ingress
