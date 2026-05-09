@@ -90,3 +90,33 @@ If a sink falls behind (e.g., Kafka broker is down), the CDC engine buffers even
 ### Sink hot-reload
 
 Sinks can be added or removed via the admin API without restarting the gateway. New sinks start with an empty cursor and replay from the beginning of the document history. Removed sinks' cursors are retained for a configurable period in case of re-addition.
+
+## Functional Test Harness (NATS)
+
+NATS sink tests run against a **live broker**, not a mock. CI brings up `nats:latest` as a service container in the `nats-integration` job; locally, run `nats-server` (or `docker run -p 4222:4222 nats:latest`) and `cargo test --features nats --test nats_sink_tests`. The test file probes the broker on startup and skips cleanly when it's unreachable, so default-feature CI is unaffected.
+
+The reusable harness lives in [`tests/common/nats.rs`](../tests/common/nats.rs). It is intentionally usable from both publish-side tests (today) and ingress-side tests (future full-duplex work) without churn.
+
+**What it provides:**
+
+- `nats_url()` / `try_client()` / `try_client_at(url)` — URL resolution (env override `NATS_URL`) and timeout-bounded client connect that returns `Option` so tests can skip silently.
+- `Harness::setup()` / `Harness::setup_with_url(url)` — builds a `TenantManager` + `CdcEngine` over a temp redb backed by the given URL. Drops the temp dir when the harness drops.
+- `make_event(org, app, doc, change_hash)` — a stable `CdcEvent` builder; tests mutate the returned struct when they need different actors/patches.
+- `subscribe(client, subject)` → `EventStream` — typed wrapper over `async_nats::Subscriber` with `next_event(timeout)`, `next_message(timeout)`, and `assert_silent(within)` for negative assertions.
+- `BrokerProxy` — local TCP proxy fronting the real broker, used to simulate broker churn deterministically. `block()` resets all live connections and refuses new ones; `unblock()` resumes accepting. The `async_nats` client treats this exactly like a transient broker outage, exercising its built-in reconnect/backoff.
+
+**Adding new tests:**
+
+```rust
+mod common;
+use common::nats::{Harness, make_event, subscribe, try_client};
+
+#[tokio::test]
+async fn my_test() {
+    let Some(client) = try_client().await else { return; };
+    let Some(h) = Harness::setup().await else { return; };
+    // ... use h.tenants, h.engine, subscribe(&client, ...) ...
+}
+```
+
+For ingress / full-duplex work (peat-gateway#91), reuse `subscribe` + `EventStream::next_event` against the inbound subject — no new harness primitives required.

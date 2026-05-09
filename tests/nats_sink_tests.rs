@@ -7,133 +7,61 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
-use peat_gateway::cdc::CdcEngine;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
-use peat_gateway::tenant::models::CdcEvent;
-use peat_gateway::tenant::TenantManager;
+use peat_gateway::tenant::models::{CdcSinkType, EnrollmentPolicy};
 use serde_json::json;
 
-fn nats_url() -> String {
-    std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into())
-}
-
-/// Try to connect to NATS. Returns None if unreachable (so tests can skip gracefully).
-async fn try_nats_client() -> Option<async_nats::Client> {
-    let url = nats_url();
-    match tokio::time::timeout(Duration::from_secs(3), async_nats::connect(&url)).await {
-        Ok(Ok(client)) => Some(client),
-        _ => {
-            eprintln!("NATS not available at {url}, skipping NATS sink tests");
-            None
-        }
-    }
-}
-
-/// Spin up a TenantManager + CdcEngine backed by temp redb, connected to NATS.
-async fn setup() -> Option<(TenantManager, CdcEngine, tempfile::TempDir)> {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("test.redb");
-
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: Some(nats_url()),
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-    };
-
-    let tenant_mgr = TenantManager::new(&config).await.unwrap();
-    match CdcEngine::new(&config, tenant_mgr.clone()).await {
-        Ok(engine) => Some((tenant_mgr, engine, dir)),
-        Err(e) => {
-            eprintln!("Failed to init CDC engine with NATS: {e}, skipping");
-            None
-        }
-    }
-}
-
-fn sample_event(org_id: &str, app_id: &str) -> CdcEvent {
-    CdcEvent {
-        org_id: org_id.into(),
-        app_id: app_id.into(),
-        document_id: "doc-001".into(),
-        change_hash: "abc123deadbeef".into(),
-        actor_id: "peer-42".into(),
-        timestamp_ms: 1700000000000,
-        patches: json!([{"op": "add", "path": "/key", "value": "hello"}]),
-    }
-}
+mod common;
+use common::nats::{
+    make_event, nats_url, subscribe, try_client, try_client_at, BrokerProxy, Harness,
+};
 
 // ── Tests ───────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn publish_event_arrives_on_nats_subject() {
-    let Some(nats_client) = try_nats_client().await else {
+    let Some(client) = try_client().await else {
         return;
     };
-    let Some((tenant_mgr, engine, _dir)) = setup().await else {
+    let Some(h) = Harness::setup().await else {
         return;
     };
 
-    // Create org + formation + NATS sink
-    tenant_mgr
+    h.tenants
         .create_org("acme".into(), "Acme Corp".into())
         .await
         .unwrap();
-    tenant_mgr
-        .create_formation(
-            "acme",
-            "logistics".into(),
-            peat_gateway::tenant::models::EnrollmentPolicy::Open,
-        )
+    h.tenants
+        .create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
         .await
         .unwrap();
-    tenant_mgr
+    h.tenants
         .create_sink(
             "acme",
-            peat_gateway::tenant::models::CdcSinkType::Nats {
+            CdcSinkType::Nats {
                 subject_prefix: "peat.acme".into(),
             },
         )
         .await
         .unwrap();
 
-    // Subscribe BEFORE publishing
-    let mut sub = nats_client
-        .subscribe("peat.acme.logistics.doc-001")
+    let mut stream = subscribe(&client, "peat.acme.logistics.doc-001").await;
+
+    let event = make_event("acme", "logistics", "doc-001", "abc123deadbeef");
+    h.engine.publish(&event).await.unwrap();
+
+    let msg = stream
+        .next_message(Duration::from_secs(5))
         .await
-        .unwrap();
+        .expect("subscription closed unexpectedly");
 
-    // Publish via CDC engine
-    let event = sample_event("acme", "logistics");
-    engine.publish(&event).await.unwrap();
-
-    // Receive with timeout
-    let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
-        .await
-        .expect("Timed out waiting for NATS message")
-        .expect("Subscription closed unexpectedly");
-
-    // Verify payload
-    let received: CdcEvent = serde_json::from_slice(&msg.payload).unwrap();
+    let received: peat_gateway::tenant::models::CdcEvent =
+        serde_json::from_slice(&msg.payload).unwrap();
     assert_eq!(received.org_id, "acme");
     assert_eq!(received.app_id, "logistics");
     assert_eq!(received.document_id, "doc-001");
     assert_eq!(received.change_hash, "abc123deadbeef");
-    assert_eq!(received.actor_id, "peer-42");
+    assert_eq!(received.actor_id, "peer-harness");
 
-    // Verify dedup header
     let headers = msg.headers.expect("Expected headers on NATS message");
     assert_eq!(
         headers
@@ -145,154 +73,123 @@ async fn publish_event_arrives_on_nats_subject() {
 
 #[tokio::test]
 async fn disabled_sink_does_not_publish() {
-    let Some(nats_client) = try_nats_client().await else {
+    let Some(client) = try_client().await else {
         return;
     };
-    let Some((tenant_mgr, engine, _dir)) = setup().await else {
+    let Some(h) = Harness::setup().await else {
         return;
     };
 
-    tenant_mgr
+    h.tenants
         .create_org("acme".into(), "Acme Corp".into())
         .await
         .unwrap();
-    tenant_mgr
-        .create_formation(
-            "acme",
-            "logistics".into(),
-            peat_gateway::tenant::models::EnrollmentPolicy::Open,
-        )
+    h.tenants
+        .create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
         .await
         .unwrap();
 
-    // Create sink, then disable it
-    let sink = tenant_mgr
+    let sink = h
+        .tenants
         .create_sink(
             "acme",
-            peat_gateway::tenant::models::CdcSinkType::Nats {
+            CdcSinkType::Nats {
                 subject_prefix: "peat.disabled".into(),
             },
         )
         .await
         .unwrap();
-    tenant_mgr
+    h.tenants
         .toggle_sink("acme", &sink.sink_id, false)
         .await
         .unwrap();
 
-    let mut sub = nats_client
-        .subscribe("peat.disabled.logistics.>")
+    let mut stream = subscribe(&client, "peat.disabled.logistics.>").await;
+
+    h.engine
+        .publish(&make_event("acme", "logistics", "doc-skip", "hash-skip"))
         .await
         .unwrap();
 
-    engine
-        .publish(&sample_event("acme", "logistics"))
-        .await
-        .unwrap();
-
-    // Should NOT receive anything
-    let result = tokio::time::timeout(Duration::from_millis(500), sub.next()).await;
-    assert!(
-        result.is_err(),
-        "Expected timeout (no message), but got a message"
-    );
+    stream.assert_silent(Duration::from_millis(500)).await;
 }
 
 #[tokio::test]
 async fn multiple_sinks_fan_out() {
-    let Some(nats_client) = try_nats_client().await else {
+    let Some(client) = try_client().await else {
         return;
     };
-    let Some((tenant_mgr, engine, _dir)) = setup().await else {
+    let Some(h) = Harness::setup().await else {
         return;
     };
 
-    tenant_mgr
+    h.tenants
         .create_org("acme".into(), "Acme Corp".into())
         .await
         .unwrap();
-    tenant_mgr
-        .create_formation(
-            "acme",
-            "comms".into(),
-            peat_gateway::tenant::models::EnrollmentPolicy::Open,
-        )
+    h.tenants
+        .create_formation("acme", "comms".into(), EnrollmentPolicy::Open)
         .await
         .unwrap();
 
-    // Two NATS sinks with different subject prefixes
-    tenant_mgr
+    h.tenants
         .create_sink(
             "acme",
-            peat_gateway::tenant::models::CdcSinkType::Nats {
+            CdcSinkType::Nats {
                 subject_prefix: "sink-a".into(),
             },
         )
         .await
         .unwrap();
-    tenant_mgr
+    h.tenants
         .create_sink(
             "acme",
-            peat_gateway::tenant::models::CdcSinkType::Nats {
+            CdcSinkType::Nats {
                 subject_prefix: "sink-b".into(),
             },
         )
         .await
         .unwrap();
 
-    let mut sub_a = nats_client.subscribe("sink-a.comms.>").await.unwrap();
-    let mut sub_b = nats_client.subscribe("sink-b.comms.>").await.unwrap();
+    let mut stream_a = subscribe(&client, "sink-a.comms.>").await;
+    let mut stream_b = subscribe(&client, "sink-b.comms.>").await;
 
-    let event = CdcEvent {
-        org_id: "acme".into(),
-        app_id: "comms".into(),
-        document_id: "doc-fanout".into(),
-        change_hash: "hash-fanout-001".into(),
-        actor_id: "peer-1".into(),
-        timestamp_ms: 1700000000000,
-        patches: json!({"changed": true}),
-    };
-    engine.publish(&event).await.unwrap();
+    let mut event = make_event("acme", "comms", "doc-fanout", "hash-fanout-001");
+    event.actor_id = "peer-1".into();
+    event.patches = json!({"changed": true});
+    h.engine.publish(&event).await.unwrap();
 
-    let msg_a = tokio::time::timeout(Duration::from_secs(5), sub_a.next())
+    let ev_a = stream_a
+        .next_event(Duration::from_secs(5))
         .await
-        .expect("Timed out on sink-a")
-        .unwrap();
-    let msg_b = tokio::time::timeout(Duration::from_secs(5), sub_b.next())
+        .expect("sink-a closed");
+    let ev_b = stream_b
+        .next_event(Duration::from_secs(5))
         .await
-        .expect("Timed out on sink-b")
-        .unwrap();
-
-    let ev_a: CdcEvent = serde_json::from_slice(&msg_a.payload).unwrap();
-    let ev_b: CdcEvent = serde_json::from_slice(&msg_b.payload).unwrap();
+        .expect("sink-b closed");
     assert_eq!(ev_a.document_id, "doc-fanout");
     assert_eq!(ev_b.document_id, "doc-fanout");
 }
 
 #[tokio::test]
 async fn org_isolation_no_cross_delivery() {
-    let Some(nats_client) = try_nats_client().await else {
+    let Some(client) = try_client().await else {
         return;
     };
-    let Some((tenant_mgr, engine, _dir)) = setup().await else {
+    let Some(h) = Harness::setup().await else {
         return;
     };
 
-    // Two orgs, each with a formation and NATS sink
     for (org, prefix) in [("alpha", "ns.alpha"), ("bravo", "ns.bravo")] {
-        tenant_mgr.create_org(org.into(), org.into()).await.unwrap();
-        tenant_mgr
-            .create_formation(
-                org,
-                "mesh".into(),
-                peat_gateway::tenant::models::EnrollmentPolicy::Open,
-            )
+        h.tenants.create_org(org.into(), org.into()).await.unwrap();
+        h.tenants
+            .create_formation(org, "mesh".into(), EnrollmentPolicy::Open)
             .await
             .unwrap();
-        tenant_mgr
+        h.tenants
             .create_sink(
                 org,
-                peat_gateway::tenant::models::CdcSinkType::Nats {
+                CdcSinkType::Nats {
                     subject_prefix: prefix.into(),
                 },
             )
@@ -300,30 +197,109 @@ async fn org_isolation_no_cross_delivery() {
             .unwrap();
     }
 
-    let mut sub_alpha = nats_client.subscribe("ns.alpha.>").await.unwrap();
-    let mut sub_bravo = nats_client.subscribe("ns.bravo.>").await.unwrap();
+    let mut stream_alpha = subscribe(&client, "ns.alpha.>").await;
+    let mut stream_bravo = subscribe(&client, "ns.bravo.>").await;
 
-    // Publish event for alpha only
-    let event = CdcEvent {
-        org_id: "alpha".into(),
-        app_id: "mesh".into(),
-        document_id: "doc-isolated".into(),
-        change_hash: "hash-isolated".into(),
-        actor_id: "peer-a".into(),
-        timestamp_ms: 1700000000000,
-        patches: json!(null),
-    };
-    engine.publish(&event).await.unwrap();
+    let mut event = make_event("alpha", "mesh", "doc-isolated", "hash-isolated");
+    event.actor_id = "peer-a".into();
+    event.patches = json!(null);
+    h.engine.publish(&event).await.unwrap();
 
-    // Alpha should get it
-    let msg = tokio::time::timeout(Duration::from_secs(5), sub_alpha.next())
+    let received = stream_alpha
+        .next_event(Duration::from_secs(5))
         .await
-        .expect("Alpha should receive the event")
-        .unwrap();
-    let received: CdcEvent = serde_json::from_slice(&msg.payload).unwrap();
+        .expect("alpha closed");
     assert_eq!(received.org_id, "alpha");
 
-    // Bravo should NOT
-    let result = tokio::time::timeout(Duration::from_millis(500), sub_bravo.next()).await;
-    assert!(result.is_err(), "Bravo should not receive alpha's event");
+    stream_bravo.assert_silent(Duration::from_millis(500)).await;
+}
+
+/// Reconnect / backoff under broker churn.
+///
+/// The proxy sits between the gateway's NATS client and the real broker. We
+/// publish, drop all active connections (`block`), publish again (the client
+/// must buffer or fail-and-retry through async_nats's reconnect path),
+/// `unblock`, and verify the post-churn event is delivered.
+#[tokio::test]
+async fn reconnect_after_broker_churn() {
+    let upstream = nats_url();
+    let host_port = upstream
+        .strip_prefix("nats://")
+        .unwrap_or(&upstream)
+        .to_string();
+
+    // Probe upstream first so we skip cleanly when no broker is available.
+    if try_client_at(&upstream).await.is_none() {
+        return;
+    }
+
+    let proxy = BrokerProxy::start(&host_port).await.expect("proxy start");
+    let proxied_url = proxy.url();
+
+    let Some(h) = Harness::setup_with_url(&proxied_url).await else {
+        return;
+    };
+
+    // Verification client connects directly to the real broker so it observes
+    // delivery regardless of proxy state.
+    let Some(verify_client) = try_client_at(&upstream).await else {
+        return;
+    };
+    let mut stream = subscribe(&verify_client, "churn.acme.svc.>").await;
+
+    h.tenants
+        .create_org("acme".into(), "Acme Corp".into())
+        .await
+        .unwrap();
+    h.tenants
+        .create_formation("acme", "svc".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+    h.tenants
+        .create_sink(
+            "acme",
+            CdcSinkType::Nats {
+                subject_prefix: "churn.acme".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Pre-churn publish establishes the connection works end-to-end.
+    h.engine
+        .publish(&make_event("acme", "svc", "doc-1", "hash-pre"))
+        .await
+        .unwrap();
+    let pre = stream
+        .next_event(Duration::from_secs(5))
+        .await
+        .expect("pre-churn event missing");
+    assert_eq!(pre.change_hash, "hash-pre");
+
+    // Drop all proxy connections — async_nats sees the broker disappear.
+    proxy.block().await;
+    // Brief pause so the client notices the disconnect before we restore.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    proxy.unblock();
+
+    // Post-churn publish: the client must reconnect through the proxy and
+    // deliver. We retry briefly because reconnect/backoff is async.
+    let post_event = make_event("acme", "svc", "doc-2", "hash-post");
+    let mut delivered = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if h.engine.publish(&post_event).await.is_ok() {
+            if let Some(ev) = stream.next_event(Duration::from_secs(2)).await {
+                if ev.change_hash == "hash-post" {
+                    delivered = true;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        delivered,
+        "post-churn event was not delivered within reconnect window"
+    );
 }
