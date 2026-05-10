@@ -750,7 +750,7 @@ fn spawn_dispatch_loop(
             .catch_unwind()
             .await
             .unwrap_or_else(|panic_payload| {
-                let panic_msg = panic_message(&panic_payload);
+                let panic_msg = panic_message(&*panic_payload);
                 metrics::counter!(
                     "peat_gw_ingress_handler_panics_total",
                     "org_id" => org_id.clone()
@@ -900,7 +900,15 @@ async fn publish_dlq_entry(
 /// usual concrete types are `&'static str` (from `panic!("...")`) or
 /// `String` (from `panic!("{}", ...)` with formatting). Anything else
 /// becomes a generic placeholder.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+///
+/// Takes `&dyn Any` (not `&Box<dyn Any + Send>` — `clippy::borrowed_box`).
+/// Callers pass `&*panic_payload` to force Box deref before the
+/// reference is taken; implicit deref coercion through
+/// `&Box<dyn Any + Send>` would silently lose the trait-object
+/// vtable and `downcast_ref` would return `None` for both `String`
+/// and `&'static str` (verified empirically — the unit tests in this
+/// module exercise both panic shapes).
+fn panic_message(payload: &dyn std::any::Any) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -1066,7 +1074,7 @@ mod tests {
         .catch_unwind()
         .await;
         let panic = result.expect_err("future should have panicked");
-        assert_eq!(panic_message(&panic), "static-str panic");
+        assert_eq!(panic_message(&*panic), "static-str panic");
     }
 
     #[tokio::test]
@@ -1080,7 +1088,7 @@ mod tests {
         .catch_unwind()
         .await;
         let panic = result.expect_err("future should have panicked");
-        assert_eq!(panic_message(&panic), "formatted dynamic panic");
+        assert_eq!(panic_message(&*panic), "formatted dynamic panic");
     }
 
     #[tokio::test]
@@ -1102,6 +1110,6 @@ mod tests {
     #[test]
     fn panic_message_falls_back_for_non_string_payloads() {
         let payload: Box<dyn std::any::Any + Send> = Box::new(42_u32);
-        assert_eq!(panic_message(&payload), "(non-string panic payload)");
+        assert_eq!(panic_message(&*payload), "(non-string panic payload)");
     }
 }
