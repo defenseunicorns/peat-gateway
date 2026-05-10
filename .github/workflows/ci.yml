@@ -133,6 +133,12 @@ jobs:
         run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests --test nats_broker_acl_tests
         env:
           NATS_URL: nats://localhost:4222
+          # Test-only credentials matching tests/fixtures/nats-multi-account.conf
+          # (a public file in this repo — values are not real secrets).
+          # Sourced from env to keep the test file free of password
+          # literals (CodeQL hard-coded-credentials rule).
+          PEAT_NATS_ACME_TEST_PASSWORD: acme-secret
+          PEAT_NATS_BRAVO_TEST_PASSWORD: bravo-secret
 
       - name: Stop NATS
         if: always()

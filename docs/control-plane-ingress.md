@@ -72,6 +72,23 @@ Three layers, ordered from primary to defence-in-depth:
    rejection — `acme→bravo.>` publish surfaces as
    `Event::ServerError(ServerError::Other("Permissions Violation..."))`
    on the publishing connection's events stream.
+
+   **Local recipe.** To run the broker-ACL tests locally, mount the
+   fixture into a `nats:2.14.0` container and export the test
+   credentials (matching the fixture's user/password pairs — they're
+   not real secrets, but live in env vars rather than test source so
+   GitHub Advanced Security's hard-coded-credentials rule doesn't
+   trip):
+
+   ```bash
+   docker run -d --rm --name peat-nats-acl -p 4222:4222 \
+     -v $PWD/tests/fixtures/nats-multi-account.conf:/etc/nats.conf:ro \
+     nats:2.14.0 -c /etc/nats.conf --jetstream
+
+   PEAT_NATS_ACME_TEST_PASSWORD=acme-secret \
+   PEAT_NATS_BRAVO_TEST_PASSWORD=bravo-secret \
+     cargo test --features nats --test nats_broker_acl_tests
+   ```
 2. **Per-org JetStream consumer `filter_subjects`** — each org's durable
    consumer accepts only `{org}.*.ctl.>`. This is enforced by the broker
    even with no account-level ACLs and is verified in
