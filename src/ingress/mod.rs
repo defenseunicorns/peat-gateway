@@ -51,8 +51,14 @@
 //!    Hooks are best-effort: failures log at warn-level without rolling
 //!    back the tenant op.
 //!
-//! Still deferred for follow-up:
-//!  - DLQ for messages that exhaust `max_deliver` — #108.
+//!  - **#108 (DLQ)** — handler errors that exhaust `max_deliver` route
+//!    the original payload to the `peat-gw-dlq` JetStream stream at
+//!    subject `peat.gw.dlq.{org_id}` with metadata headers, then `term`
+//!    so the broker stops redelivering. `max_deliver` and `ack_wait` are
+//!    now configurable on `NatsIngressConfig`. Without the DLQ, exhausted
+//!    payloads were silently dropped. Out-of-scope follow-ups: handler
+//!    panic recovery (panics still crash the dispatch task) and an admin
+//!    API for DLQ inspection / replay (operators use `nats` CLI today).
 
 #![cfg(feature = "nats")]
 
@@ -82,13 +88,15 @@ use handlers::{Dispatcher, HandlerContext, PermissiveAuthz};
 // inheriting `Default::default()` because the JS defaults are unsafe for
 // control-plane workloads:
 //
-//  - `max_deliver = -1` (infinite redelivery): a single poison-pill
+//  - `max_deliver` (configurable, default 5): a single poison-pill
 //    payload would head-of-line block the consumer forever, starving
 //    every subsequent control-plane event for the same org. Bound it
 //    so dispatch failures surface and downstream tooling can drain.
+//    Configured via `NatsIngressConfig::max_deliver`.
 //
-//  - `ack_wait = 30s`: kept at the default but pinned explicitly so it
-//    can't drift if upstream changes the default.
+//  - `ack_wait` (configurable, default 30s): pinned explicitly so it
+//    can't drift if upstream changes the default. Configured via
+//    `NatsIngressConfig::ack_wait_secs`.
 //
 //  - `max_ack_pending = 1024`: caps in-flight unacked messages per
 //    consumer, providing back-pressure when handlers stall.
@@ -98,13 +106,41 @@ use handlers::{Dispatcher, HandlerContext, PermissiveAuthz};
 // every control-plane event — a head-of-line and ack-tracking hazard
 // flagged in the QA Review on PR #102. Migration to pull consumers
 // (which give natural cross-instance fan-in) is tracked under #92.
-//
-// DLQ for messages that exhaust `max_deliver` is deferred to a separate
-// follow-up — without one, exhausted messages are dropped after
-// max_deliver attempts (still better than infinite-loop starvation).
-const CONSUMER_MAX_DELIVER: i64 = 5;
-const CONSUMER_ACK_WAIT: Duration = Duration::from_secs(30);
 const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
+
+// ── DLQ config (peat-gateway#108) ───────────────────────────────
+//
+// Messages whose handler returns `Err` AND that have exhausted
+// `max_deliver` attempts are routed to a Dead Letter Queue stream
+// before being terminated (so the broker stops redelivering and the
+// stream cursor advances). Without a DLQ, exhausted payloads were
+// silently dropped, leaving operators no way to inspect or replay.
+//
+// Subject convention: `peat.gw.dlq.{org_id}` (literal prefix outside
+// the per-org control-plane namespace, so it does not overlap with
+// per-org consumer filter_subjects). Stream `peat-gw-dlq` captures
+// `peat.gw.dlq.>` and is created idempotently at engine startup when
+// ingress is enabled.
+//
+// Each DLQ entry's payload is the original message body verbatim.
+// Metadata travels in headers so operators can route / replay without
+// re-parsing the payload:
+//
+//   Peat-Org-Id          — the org_id parsed from the original subject
+//   Peat-Original-Subject — the failing subject
+//   Peat-Delivery-Count  — how many times the broker tried before DLQ
+//   Peat-Last-Error      — error string from the last handler attempt
+//
+// Out of scope here, tracked separately:
+//  - Handler panic recovery (panics still crash the dispatch task) —
+//    see #108 issue's open follow-ups.
+//  - Admin API endpoint for DLQ inspection / replay.
+const DLQ_STREAM_NAME: &str = "peat-gw-dlq";
+const DLQ_SUBJECT_ROOT: &str = "peat.gw.dlq";
+const DLQ_HEADER_ORG_ID: &str = "Peat-Org-Id";
+const DLQ_HEADER_ORIGINAL_SUBJECT: &str = "Peat-Original-Subject";
+const DLQ_HEADER_DELIVERY_COUNT: &str = "Peat-Delivery-Count";
+const DLQ_HEADER_LAST_ERROR: &str = "Peat-Last-Error";
 
 // ── Stream-config TOCTOU mitigation ────────────────────────────
 //
@@ -202,10 +238,23 @@ impl IngressEngine {
         })?;
         let js = jetstream::new(client);
 
+        // Idempotently ensure the DLQ stream so the dispatch loop can
+        // publish to it later without doing JS-API calls in the hot path.
+        // Stream subjects use a literal `peat.gw.dlq.>` prefix that does
+        // not overlap with any per-org control-plane subject pattern.
+        js.get_or_create_stream(jetstream::stream::Config {
+            name: DLQ_STREAM_NAME.into(),
+            subjects: vec![format!("{DLQ_SUBJECT_ROOT}.>")],
+            ..Default::default()
+        })
+        .await
+        .with_context(|| format!("ingress engine failed to ensure DLQ stream {DLQ_STREAM_NAME}"))?;
+
         info!(
             url = %nats_cfg.url,
             stream = %nats_cfg.stream_name,
             consumer_prefix = %nats_cfg.consumer_prefix,
+            dlq_stream = DLQ_STREAM_NAME,
             "Control-plane ingress engine initialized"
         );
 
@@ -322,8 +371,8 @@ impl IngressEngine {
                     deliver_subject: deliver_subject(&inner.config.consumer_prefix, org_id),
                     deliver_group: Some(deliver_group(&inner.config.consumer_prefix, org_id)),
                     filter_subjects: org_subjects.clone(),
-                    max_deliver: CONSUMER_MAX_DELIVER,
-                    ack_wait: CONSUMER_ACK_WAIT,
+                    max_deliver: inner.config.max_deliver,
+                    ack_wait: Duration::from_secs(inner.config.ack_wait_secs),
                     max_ack_pending: CONSUMER_MAX_ACK_PENDING,
                     ..Default::default()
                 },
@@ -353,6 +402,8 @@ impl IngressEngine {
             inner.dispatcher.clone(),
             inner.authz.clone(),
             self.tenants.clone(),
+            inner.js.clone(),
+            inner.config.max_deliver,
         );
         tasks_guard.insert(org_id.to_string(), task);
         drop(tasks_guard);
@@ -614,15 +665,19 @@ async fn try_ensure_stream_excludes(
 /// message's subject, validates the parsed `org_id` against the expected
 /// org (in-process tenant-isolation layer; #97 tracks the broker-level
 /// account ACL), then routes to the dispatcher. Successful handler →
-/// `ack`; handler error → `Nak(None)` so JetStream applies its
-/// `max_deliver` retry budget (#104) and ultimately drops to the DLQ
-/// once #108 ships.
+/// `ack`; handler error with attempts remaining → `Nak(None)` so JetStream
+/// applies its `max_deliver` retry budget (#104); handler error on the
+/// final attempt → publish to the DLQ stream + `term` so the broker
+/// stops redelivering and the cursor advances (#108).
+#[allow(clippy::too_many_arguments)]
 fn spawn_dispatch_loop(
     org_id: String,
     consumer: IngressConsumer,
     dispatcher: Arc<Dispatcher>,
     authz: Arc<dyn handlers::AuthzCheck>,
     tenants: TenantManager,
+    js: jetstream::Context,
+    max_deliver: i64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut messages = match consumer.messages().await {
@@ -667,20 +722,92 @@ fn spawn_dispatch_loop(
                         warn!(org_id = %org_id, subject = %subject, error = %e, "ingress dispatch: ack failed");
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        org_id = %org_id,
-                        subject = %subject,
-                        error = %e,
-                        "ingress dispatch: handler error; nack'ing for retry"
-                    );
-                    if let Err(ack_err) = msg.ack_with(AckKind::Nak(None)).await {
-                        warn!(org_id = %org_id, subject = %subject, error = %ack_err, "ingress dispatch: nack failed");
+                Err(handler_err) => {
+                    let delivered = msg.info().map(|i| i.delivered).unwrap_or(0);
+                    if delivered >= max_deliver {
+                        warn!(
+                            org_id = %org_id,
+                            subject = %subject,
+                            delivered,
+                            error = %handler_err,
+                            "ingress dispatch: max_deliver reached; routing to DLQ + term"
+                        );
+                        if let Err(dlq_err) = publish_dlq_entry(
+                            &js,
+                            &org_id,
+                            &subject,
+                            delivered,
+                            &handler_err.to_string(),
+                            &msg.payload,
+                        )
+                        .await
+                        {
+                            // DLQ publish failed. Surface and fall through
+                            // to nack so the broker keeps the message
+                            // around (it'll exceed max_deliver anyway and
+                            // be dropped, but at least we don't lose it
+                            // silently if the DLQ stream is broken).
+                            warn!(
+                                org_id = %org_id,
+                                subject = %subject,
+                                error = %dlq_err,
+                                "ingress dispatch: DLQ publish failed; falling back to nack"
+                            );
+                            let _ = msg.ack_with(AckKind::Nak(None)).await;
+                        } else if let Err(ack_err) = msg.ack_with(AckKind::Term).await {
+                            warn!(org_id = %org_id, subject = %subject, error = %ack_err, "ingress dispatch: term after DLQ failed");
+                        }
+                    } else {
+                        warn!(
+                            org_id = %org_id,
+                            subject = %subject,
+                            delivered,
+                            error = %handler_err,
+                            "ingress dispatch: handler error; nack'ing for retry"
+                        );
+                        if let Err(ack_err) = msg.ack_with(AckKind::Nak(None)).await {
+                            warn!(org_id = %org_id, subject = %subject, error = %ack_err, "ingress dispatch: nack failed");
+                        }
                     }
                 }
             }
         }
     })
+}
+
+/// Publish a DLQ entry to `peat.gw.dlq.{org_id}` with metadata in headers.
+/// Uses JetStream publish (not core) so the DLQ entry is durably stored
+/// in the `peat-gw-dlq` stream and survives broker restarts.
+async fn publish_dlq_entry(
+    js: &jetstream::Context,
+    org_id: &str,
+    original_subject: &str,
+    delivery_count: i64,
+    last_error: &str,
+    payload: &[u8],
+) -> Result<()> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert(DLQ_HEADER_ORG_ID, org_id);
+    headers.insert(DLQ_HEADER_ORIGINAL_SUBJECT, original_subject);
+    headers.insert(
+        DLQ_HEADER_DELIVERY_COUNT,
+        delivery_count.to_string().as_str(),
+    );
+    headers.insert(DLQ_HEADER_LAST_ERROR, last_error);
+
+    let dlq_subject = format!("{DLQ_SUBJECT_ROOT}.{org_id}");
+    js.publish_with_headers(dlq_subject.clone(), headers, payload.to_vec().into())
+        .await
+        .with_context(|| format!("DLQ publish to {dlq_subject} failed"))?
+        .await
+        .with_context(|| format!("DLQ publish ack from {dlq_subject} failed"))?;
+    info!(
+        org_id = org_id,
+        original_subject = original_subject,
+        delivery_count,
+        "ingress DLQ entry published"
+    );
+    Ok(())
 }
 
 /// Process one message end-to-end: parse subject, revalidate org_id, route

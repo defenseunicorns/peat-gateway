@@ -154,14 +154,69 @@ in `src/tenant/observer.rs`:
 - Tests opt in only when they want to exercise the auto-driven path; the
   explicit API still works without registration.
 
+## Dead Letter Queue (DLQ)
+
+When a control-plane handler returns `Err` and the broker has exhausted the
+`max_deliver` retry budget for that message, the dispatch loop publishes
+the original payload to a DLQ stream before terminating the message
+(broker stops redelivering, stream cursor advances). Without the DLQ,
+exhausted payloads were silently dropped — operators had no way to
+inspect or replay them.
+
+**Subject convention.** A single shared JetStream stream `peat-gw-dlq`
+captures the literal-prefix subject space `peat.gw.dlq.>`. Each entry
+publishes to `peat.gw.dlq.{org_id}` (a literal subject, not a pattern).
+Per-org isolation is via the `org_id` token; broker-level account ACLs
+([#97][gh-97]) restrict who can subscribe to a given org's DLQ.
+
+**Headers** (every entry):
+
+| Header | Value |
+|---|---|
+| `Peat-Org-Id` | The `org_id` parsed from the failing subject |
+| `Peat-Original-Subject` | The subject the failed message was originally published on |
+| `Peat-Delivery-Count` | How many times the broker tried before giving up (= `max_deliver`) |
+| `Peat-Last-Error` | Stringified error from the last handler attempt |
+
+**Payload** is the original message bytes verbatim, suitable for replay.
+
+**Tunables** (`NatsIngressConfig` / env):
+
+| Field | Env | Default |
+|---|---|---|
+| `max_deliver` | `PEAT_INGRESS_MAX_DELIVER` | `5` |
+| `ack_wait_secs` | `PEAT_INGRESS_ACK_WAIT_SECS` | `30` |
+
+**Inspecting DLQ entries.** Use the `nats` CLI with the gateway's
+JetStream credentials:
+
+```bash
+# stream-level snapshot
+nats stream info peat-gw-dlq
+
+# pull a few recent entries for one org (replace acme with your org_id)
+nats consumer add peat-gw-dlq dlq-acme-inspect \
+    --filter 'peat.gw.dlq.acme' --pull --deliver=all
+nats consumer next peat-gw-dlq dlq-acme-inspect --count=5 --headers
+```
+
+**Out of scope** (separate follow-ups):
+
+- **Handler panic recovery** — a panicking handler still crashes the
+  per-org dispatch task. The orphaned consumer remains; restart or
+  re-`ensure_org_subscription` recovers. Tracked as a follow-up to
+  [#108][gh-108].
+- **Admin API endpoint** for DLQ inspection / replay — operators use
+  the `nats` CLI today. A REST surface for this lives behind the same
+  IDAM federation work as [#99][gh-99].
+
 ## Open work
 
 | Item | Issue | Notes |
 |---|---|---|
 | Real handlers for peers / certs / idp events | [#99][gh-99] | Phase 3 (Identity Federation) |
-| DLQ for messages that exhaust `max_deliver` | [#108][gh-108] | exhausted messages currently dropped (logged) |
 | Broker-level account ACL test (multi-account CI fixture) | [#97][gh-97] | primary tenant-isolation boundary, currently unenforced |
-| Helm chart values for ingress | [#98][gh-98] | mechanical once the config struct is settled (this PR sets it) |
+| Helm chart values for ingress | [#98][gh-98] | shipped, listed for completeness |
 
 ## Functional test harness
 

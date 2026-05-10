@@ -58,13 +58,13 @@ pub struct IngressConfig {
     pub nats: Option<NatsIngressConfig>,
 }
 
-/// NATS-specific ingress settings — JetStream stream + per-org durable
-/// consumer naming.
+/// NATS-specific ingress settings — JetStream stream, per-org durable
+/// consumer naming, retry/DLQ knobs.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NatsIngressConfig {
     /// NATS server URL. Typically the same broker the CDC sink publishes to.
     pub url: String,
-    /// JetStream stream name covering all `*.ctl.>` and `*.*.ctl.>` subjects.
+    /// JetStream stream name covering all per-org control-plane subjects.
     /// Defaults to `peat-gw-ctl`.
     #[serde(default = "default_ingress_stream_name")]
     pub stream_name: String,
@@ -72,6 +72,17 @@ pub struct NatsIngressConfig {
     /// like `{prefix}-{org_id}`. Defaults to `peat-gw`.
     #[serde(default = "default_ingress_consumer_prefix")]
     pub consumer_prefix: String,
+    /// Max delivery attempts per message before the broker stops
+    /// redelivering and the gateway routes the payload to the DLQ
+    /// (peat-gateway#108). Defaults to 5.
+    #[serde(default = "default_ingress_max_deliver")]
+    pub max_deliver: i64,
+    /// Per-message ack timeout. After this elapses without an ack, the
+    /// broker considers the delivery failed and may redeliver (subject to
+    /// `max_deliver`). Defaults to 30 seconds. Tests with poison-pill
+    /// scenarios may set this much lower for fast test runs.
+    #[serde(default = "default_ingress_ack_wait_secs")]
+    pub ack_wait_secs: u64,
 }
 
 fn default_ingress_stream_name() -> String {
@@ -80,6 +91,14 @@ fn default_ingress_stream_name() -> String {
 
 fn default_ingress_consumer_prefix() -> String {
     "peat-gw".into()
+}
+
+fn default_ingress_max_deliver() -> i64 {
+    5
+}
+
+fn default_ingress_ack_wait_secs() -> u64 {
+    30
 }
 
 impl GatewayConfig {
@@ -110,6 +129,14 @@ impl GatewayConfig {
                         .unwrap_or_else(|_| default_ingress_stream_name()),
                     consumer_prefix: env::var("PEAT_INGRESS_CONSUMER_PREFIX")
                         .unwrap_or_else(|_| default_ingress_consumer_prefix()),
+                    max_deliver: env::var("PEAT_INGRESS_MAX_DELIVER")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_ingress_max_deliver),
+                    ack_wait_secs: env::var("PEAT_INGRESS_ACK_WAIT_SECS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_ingress_ack_wait_secs),
                 }),
         };
 
