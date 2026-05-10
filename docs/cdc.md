@@ -49,13 +49,18 @@ Why not exactly-once? Exactly-once requires transactional coordination between t
 
 ### NATS JetStream
 
-Subject hierarchy: `{subject_prefix}.{app_id}.{document_id}` (the per-tenant CDC sink config sets `subject_prefix`).
+Subject hierarchy: `{org_id}.{subject_prefix}.{app_id}.{document_id}`.
+
+`org_id` is the **leading subject token, injected by the platform** (sourced from `CdcEvent::org_id`, not from any tenant-controlled field). Per-tenant subject isolation is therefore a structural invariant: two distinct orgs cannot land messages in the same subject space, regardless of what `subject_prefix` strings they configure. (Validated by the `distinct_orgs_with_same_subject_prefix_do_not_cross_contaminate` integration test.)
+
+`subject_prefix` is constrained to `[A-Za-z0-9._-]+` with no leading/trailing/double dots; NATS wildcards (`*`, `>`) and whitespace are rejected at sink creation.
 
 Events are published via **JetStream** (peat-gateway#92's first slice; ADR-055 conformant). The sink:
 
-- Idempotently ensures a per-prefix stream named `peat-gw-cdc-{sanitized-prefix}` covering `{prefix}.>` on first publish to each prefix; subsequent publishes hit a local cache.
+- Idempotently ensures a per-`(org, prefix)` stream named `peat-gw-cdc-{sanitized-org}-{sanitized-prefix}` covering `{org_id}.{subject_prefix}.>` on first publish; subsequent publishes hit a local cache.
+- Configures explicit stream tunables: `duplicate_window` = 2 minutes (load-bearing for `Nats-Msg-Id` dedup), `max_age` = 7 days, `max_bytes` = 1 GiB, `num_replicas` = 1. Operators wanting different policy should pre-create the stream — `get_or_create_stream` is idempotent on name and won't overwrite an existing stream's config.
 - Awaits the broker's publish ack — `publish` returns `Ok` only after the stream has durably stored the event and returned a sequence number. **At-least-once delivery**, replacing the prior at-most-once core-publish path.
-- Sets the `Nats-Msg-Id` header to the change hash; JetStream's default 2-minute dedup window suppresses duplicates from gateway replays.
+- Sets the `Nats-Msg-Id` header to the change hash; the configured 2-minute window suppresses duplicates from gateway replays.
 
 JS publish remains wire-compatible with core NATS subscribers — the broker captures the message into the stream AND distributes to any matching SUBs, so consumers built on either core or JS continue to work.
 
