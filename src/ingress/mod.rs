@@ -66,6 +66,7 @@ pub mod events;
 pub mod handlers;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,7 +76,7 @@ use async_nats::jetstream::{
     consumer::{push, Consumer},
     AckKind,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -726,16 +727,45 @@ fn spawn_dispatch_loop(
             };
 
             let subject = msg.subject.as_str().to_string();
-            match handle_one_message(
+            // Wrap the handler invocation in `catch_unwind` so a panicking
+            // handler can't crash the per-org dispatch task and orphan the
+            // JetStream consumer. Per peat-gateway#118 (the follow-up for
+            // peat-gateway#108's documented gap). `AssertUnwindSafe` is
+            // required because async futures don't auto-implement
+            // `UnwindSafe` — but the future has no shared mutable state
+            // that crosses the catch boundary: each invocation owns its
+            // borrowed arguments, and tenant-manager / dispatcher state
+            // is behind interior locks that are released as part of
+            // unwinding. A caught panic surfaces as Err(panic_message)
+            // which then takes the same DLQ-on-final / nack-otherwise
+            // path as a handler-returned error.
+            let dispatch_result = AssertUnwindSafe(handle_one_message(
                 &subject,
                 &msg.payload,
                 &org_id,
                 &dispatcher,
                 &authz,
                 &tenants,
-            )
+            ))
+            .catch_unwind()
             .await
-            {
+            .unwrap_or_else(|panic_payload| {
+                let panic_msg = panic_message(&panic_payload);
+                metrics::counter!(
+                    "peat_gw_ingress_handler_panics_total",
+                    "org_id" => org_id.clone()
+                )
+                .increment(1);
+                tracing::error!(
+                    org_id = %org_id,
+                    subject = %subject,
+                    panic = %panic_msg,
+                    "ingress dispatch: HANDLER PANICKED — caught and treated as error so the \
+                     dispatch task survives. Orphan-consumer hazard avoided."
+                );
+                Err(anyhow!("handler panicked: {panic_msg}"))
+            });
+            match dispatch_result {
                 Ok(()) => {
                     if let Err(e) = msg.ack().await {
                         warn!(org_id = %org_id, subject = %subject, error = %e, "ingress dispatch: ack failed");
@@ -863,6 +893,21 @@ async fn publish_dlq_entry(
         "ingress DLQ entry published"
     );
     Ok(())
+}
+
+/// Recover a human-readable message from a `catch_unwind` payload.
+/// Panics in Rust carry an opaque `Box<dyn Any + Send>` payload; the
+/// usual concrete types are `&'static str` (from `panic!("...")`) or
+/// `String` (from `panic!("{}", ...)` with formatting). Anything else
+/// becomes a generic placeholder.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(non-string panic payload)".to_string()
+    }
 }
 
 /// Truncate at a UTF-8 char boundary so the result is always valid for
@@ -1007,5 +1052,56 @@ mod tests {
     fn parse_ctl_subject_rejects_too_short() {
         assert!(parse_ctl_subject("acme").is_err());
         assert!(parse_ctl_subject("acme.logistics").is_err());
+    }
+
+    // ── Panic-recovery wrapper (peat-gateway#118) ───────────────
+
+    #[tokio::test]
+    async fn catch_unwind_recovers_str_panic_payload() {
+        let result = AssertUnwindSafe(async {
+            panic!("static-str panic");
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        })
+        .catch_unwind()
+        .await;
+        let panic = result.expect_err("future should have panicked");
+        assert_eq!(panic_message(&panic), "static-str panic");
+    }
+
+    #[tokio::test]
+    async fn catch_unwind_recovers_string_panic_payload() {
+        let result = AssertUnwindSafe(async {
+            let detail = "dynamic";
+            panic!("formatted {detail} panic");
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        })
+        .catch_unwind()
+        .await;
+        let panic = result.expect_err("future should have panicked");
+        assert_eq!(panic_message(&panic), "formatted dynamic panic");
+    }
+
+    #[tokio::test]
+    async fn catch_unwind_returns_handler_result_on_no_panic() {
+        let ok: Result<(), anyhow::Error> = AssertUnwindSafe(async { Ok(()) })
+            .catch_unwind()
+            .await
+            .unwrap();
+        assert!(ok.is_ok());
+
+        let err: Result<(), anyhow::Error> =
+            AssertUnwindSafe(async { Err(anyhow!("normal handler error")) })
+                .catch_unwind()
+                .await
+                .unwrap();
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn panic_message_falls_back_for_non_string_payloads() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+        assert_eq!(panic_message(&payload), "(non-string panic payload)");
     }
 }
