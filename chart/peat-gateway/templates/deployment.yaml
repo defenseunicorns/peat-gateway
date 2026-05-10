@@ -73,6 +73,10 @@ spec:
               value: {{ .Values.ingress.nats.streamName | quote }}
             - name: PEAT_INGRESS_CONSUMER_PREFIX
               value: {{ .Values.ingress.nats.consumerPrefix | quote }}
+            - name: PEAT_INGRESS_MAX_DELIVER
+              value: {{ .Values.ingress.nats.maxDeliver | quote }}
+            - name: PEAT_INGRESS_ACK_WAIT_SECS
+              value: {{ .Values.ingress.nats.ackWaitSecs | quote }}
             {{- end }}
           ports:
             - name: http

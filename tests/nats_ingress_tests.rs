@@ -81,6 +81,14 @@ struct StubCtlEvent {
 }
 
 async fn build_engine(stream_name: &str) -> Option<(IngressEngine, tempfile::TempDir)> {
+    build_engine_with(stream_name, 5, 30).await
+}
+
+async fn build_engine_with(
+    stream_name: &str,
+    max_deliver: i64,
+    ack_wait_secs: u64,
+) -> Option<(IngressEngine, tempfile::TempDir)> {
     let _ = try_client().await?;
     let dir = tempfile::tempdir().unwrap();
     let config = base_config(
@@ -90,6 +98,8 @@ async fn build_engine(stream_name: &str) -> Option<(IngressEngine, tempfile::Tem
                 url: common::nats::nats_url(),
                 stream_name: stream_name.into(),
                 consumer_prefix: "peat-gw-test".into(),
+                max_deliver,
+                ack_wait_secs,
             }),
         },
     );
@@ -807,4 +817,116 @@ async fn unregistered_engine_does_not_auto_react() {
         engine.consumer_for_org(&org).await.is_none(),
         "without registration, create_org must not touch ingress state"
     );
+}
+
+// ── DLQ (#108) ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn poison_pill_payload_routes_to_dlq_on_max_deliver() {
+    // Builds an engine with max_deliver=1 + a short ack_wait so the test
+    // doesn't sit through the broker's redelivery backoff. A malformed
+    // JSON payload trips `serde_json::from_slice` inside the
+    // formations.create handler — the handler returns Err — the
+    // dispatch loop sees `delivered >= max_deliver` and routes the
+    // payload to the DLQ stream at `peat.gw.dlq.{org_id}`.
+
+    let stream_name = unique_stream("dlq");
+    let Some((engine, _dir)) = build_engine_with(&stream_name, 1, 1).await else {
+        return;
+    };
+    let client = try_client().await.unwrap();
+    let js = jetstream(&client);
+    delete_stream(&js, &stream_name).await;
+
+    let org = unique_org("acme");
+    engine
+        .tenants()
+        .create_org(org.clone(), "Acme".into())
+        .await
+        .unwrap();
+    engine.ensure_org_subscription(&org).await.unwrap();
+
+    // Pull-consumer on the DLQ stream so the test can wait deterministically
+    // for the entry. peat-gw-dlq is global; we filter on this org's subject.
+    let dlq_stream = js
+        .get_stream("peat-gw-dlq")
+        .await
+        .expect("DLQ stream missing — engine should have ensured it at startup");
+    let dlq_subject = format!("peat.gw.dlq.{org}");
+    let dlq_consumer = dlq_stream
+        .get_or_create_consumer(
+            &format!("dlq-test-{org}"),
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(format!("dlq-test-{org}")),
+                filter_subject: dlq_subject.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create DLQ pull consumer");
+
+    // Publish a malformed JSON payload to the formations.create subject.
+    // The handler's `serde_json::from_slice` will fail.
+    let bad_subject = format!("{org}._org.ctl.formations.create");
+    js.publish(bad_subject.clone(), "{not valid json".into())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+
+    // Pull the DLQ entry. With max_deliver=1 + ack_wait=1s, the handler
+    // fails once and the dispatch loop routes to DLQ within ~1-2 seconds.
+    let mut messages = dlq_consumer
+        .messages()
+        .await
+        .expect("DLQ consumer messages stream");
+    let dlq_msg = tokio::time::timeout(Duration::from_secs(10), messages.next())
+        .await
+        .expect("timed out waiting for DLQ entry")
+        .expect("DLQ stream closed")
+        .expect("DLQ message error");
+
+    assert_eq!(dlq_msg.subject.as_str(), dlq_subject);
+    assert_eq!(
+        dlq_msg.payload.as_ref(),
+        b"{not valid json",
+        "DLQ payload must round-trip the original bytes verbatim"
+    );
+
+    let headers = dlq_msg
+        .headers
+        .as_ref()
+        .expect("DLQ entry must carry headers");
+    assert_eq!(
+        headers.get("Peat-Org-Id").map(|v| v.as_str()),
+        Some(org.as_str())
+    );
+    assert_eq!(
+        headers.get("Peat-Original-Subject").map(|v| v.as_str()),
+        Some(bad_subject.as_str())
+    );
+    assert_eq!(
+        headers.get("Peat-Delivery-Count").map(|v| v.as_str()),
+        Some("1"),
+        "delivery count should equal max_deliver (1) on the final attempt"
+    );
+    assert!(
+        headers
+            .get("Peat-Last-Error")
+            .map(|v| v.as_str())
+            .unwrap_or("")
+            .contains("decode FormationsCreateEvent payload"),
+        "Peat-Last-Error should carry the handler's error context"
+    );
+
+    dlq_msg.ack().await.unwrap();
+
+    // Clean up the per-test pull consumer on the shared peat-gw-dlq
+    // stream. Without this each CI run leaves an abandoned dlq-test-{org}
+    // consumer behind. Intentionally NOT deleting peat-gw-dlq itself
+    // — it's shared across all test engines (each engine.new()
+    // idempotently re-creates it) and a delete here would race other
+    // tests holding DLQ consumers.
+    let _ = dlq_stream.delete_consumer(&format!("dlq-test-{org}")).await;
+    delete_stream(&js, &stream_name).await;
 }
