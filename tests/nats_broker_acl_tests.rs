@@ -32,9 +32,44 @@ use tokio::sync::Mutex;
 mod common;
 use common::nats::nats_url;
 
+/// True when the runner explicitly requires the broker-ACL fixture
+/// (i.e. CI). When this is set and any precondition for the test
+/// fails — missing credentials, unreachable broker, fixture not
+/// mounted — we panic instead of silently skipping. This is what
+/// keeps a regression that drops the fixture mount or env vars from
+/// silently no-op'ing the **primary** tenant-isolation suite per
+/// ADR-055 Amendment A. Per QA Review on PR #122. Local dev without
+/// the fixture leaves the env var unset and gets the silent-skip
+/// path.
+fn require_fixture() -> bool {
+    matches!(
+        std::env::var("PEAT_REQUIRE_NATS_ACL_FIXTURE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// Skip silently when local, panic loudly when CI required the
+/// fixture. Centralises the policy so each precondition site reads
+/// the same way.
+fn skip_or_fail(reason: &str) {
+    if require_fixture() {
+        panic!(
+            "PEAT_REQUIRE_NATS_ACL_FIXTURE is set but {reason}. The broker-level \
+             ACL suite is the primary tenant-isolation boundary (ADR-055 \
+             Amendment A); failing fast here so a CI regression that drops the \
+             fixture mount, env vars, or credentials cannot silently green-light \
+             the suite."
+        );
+    }
+    eprintln!(
+        "{reason} — skipping broker ACL test (set PEAT_REQUIRE_NATS_ACL_FIXTURE=1 to fail fast)"
+    );
+}
+
 /// Read a test-only NATS credential from the environment. Returns
-/// `None` when unset — the test then skips silently (same pattern as
-/// when the broker is unreachable).
+/// `None` when unset and we're not in fixture-required mode (i.e.
+/// local dev without the fixture); panics when `PEAT_REQUIRE_NATS_ACL_FIXTURE`
+/// is set so CI can't silently no-op.
 ///
 /// The credentials live in the environment rather than being literals
 /// here so that GitHub Advanced Security / CodeQL doesn't flag the
@@ -48,10 +83,7 @@ fn test_credential(env_var: &str) -> Option<String> {
     match std::env::var(env_var) {
         Ok(v) if !v.is_empty() => Some(v),
         _ => {
-            eprintln!(
-                "{env_var} unset — skipping broker ACL test (set per \
-                 docs/control-plane-ingress.md to run locally)"
-            );
+            skip_or_fail(&format!("{env_var} unset"));
             None
         }
     }
@@ -80,14 +112,13 @@ async fn connect_as(
     match tokio::time::timeout(Duration::from_secs(3), opts.connect(&url)).await {
         Ok(Ok(client)) => Some((client, captured)),
         Ok(Err(e)) => {
-            eprintln!(
-                "could not connect as {user} to {url} ({e}); \
-                 multi-account fixture not mounted?"
-            );
+            skip_or_fail(&format!(
+                "could not connect as {user} to {url} ({e}) — multi-account fixture not mounted?"
+            ));
             None
         }
         Err(_) => {
-            eprintln!("connect to {url} timed out; broker not reachable");
+            skip_or_fail(&format!("connect to {url} timed out; broker not reachable"));
             None
         }
     }

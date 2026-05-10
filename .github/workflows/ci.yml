@@ -139,6 +139,14 @@ jobs:
           # literals (CodeQL hard-coded-credentials rule).
           PEAT_NATS_ACME_TEST_PASSWORD: acme-secret
           PEAT_NATS_BRAVO_TEST_PASSWORD: bravo-secret
+          # Fail fast (panic) instead of silent-skipping the broker-ACL
+          # suite if the fixture mount, credentials, or broker
+          # connectivity are missing. ADR-055 Amendment A names the
+          # broker-level ACLs as the **primary** tenant-isolation
+          # boundary, so a CI regression that drops any of those
+          # preconditions must surface as a hard test failure rather
+          # than a vacuous green. Per QA Review on PR #122.
+          PEAT_REQUIRE_NATS_ACL_FIXTURE: "1"
 
       - name: Stop NATS
         if: always()
