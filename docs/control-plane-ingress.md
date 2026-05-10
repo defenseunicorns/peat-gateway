@@ -62,8 +62,33 @@ Three layers, ordered from primary to defence-in-depth:
 
 1. **Broker-level account ACLs** ([peat-gateway#97][gh-97]) — per-org NATS
    accounts with publish permission scoped to the org's own
-   `{org}.*.ctl.>` subject space. Cross-org publish is rejected by the
-   broker. *Not yet shipped — primary boundary is missing today.*
+   `{org}.>` subject space. Cross-org publish is rejected by the
+   broker before reaching the gateway. The reference test config in
+   `tests/fixtures/nats-multi-account.conf` shows the canonical layout
+   (per-org account with `publish.allow: ["{org}.>"]`); production
+   deployments mirror this structure with one NATS account per
+   gateway-managed org. CI runs the test broker with this config so
+   the new `tests/nats_broker_acl_tests.rs` exercises actual broker
+   rejection — `acme→bravo.>` publish surfaces as
+   `Event::ServerError(ServerError::Other("Permissions Violation..."))`
+   on the publishing connection's events stream.
+
+   **Local recipe.** To run the broker-ACL tests locally, mount the
+   fixture into a `nats:2.14.0` container and export the test
+   credentials (matching the fixture's user/password pairs — they're
+   not real secrets, but live in env vars rather than test source so
+   GitHub Advanced Security's hard-coded-credentials rule doesn't
+   trip):
+
+   ```bash
+   docker run -d --rm --name peat-nats-acl -p 4222:4222 \
+     -v $PWD/tests/fixtures/nats-multi-account.conf:/etc/nats.conf:ro \
+     nats:2.14.0 -c /etc/nats.conf --jetstream
+
+   PEAT_NATS_ACME_TEST_PASSWORD=acme-secret \
+   PEAT_NATS_BRAVO_TEST_PASSWORD=bravo-secret \
+     cargo test --features nats --test nats_broker_acl_tests
+   ```
 2. **Per-org JetStream consumer `filter_subjects`** — each org's durable
    consumer accepts only `{org}.*.ctl.>`. This is enforced by the broker
    even with no account-level ACLs and is verified in

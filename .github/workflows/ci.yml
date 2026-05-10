@@ -97,15 +97,27 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
 
-      - name: Start NATS with JetStream
+      - name: Start NATS with JetStream + multi-account config
         # Pin to a specific nats-server version (peat-gateway#101) so a
         # major release that changes default behaviour or strict-validation
         # rules can't silently break this job — same exposure class as the
         # pnpm 11 surprise that took out publish on 2026-05-08 (#96). Bumps
         # are an explicit human-driven PR; the version here is updated
         # together with any local-dev guidance in docs/cdc.md.
+        #
+        # The broker is started with `tests/fixtures/nats-multi-account.conf`
+        # (peat-gateway#97), which defines per-org ACME / BRAVO accounts
+        # alongside the default $G account that anonymous connections fall
+        # into. Existing tests connect anonymously → $G with full
+        # permissions, behaviour unchanged. The new
+        # tests/nats_broker_acl_tests.rs connects as user=acme and asserts
+        # the broker rejects publishes outside acme's permitted subject
+        # space — the broker-level tenant-isolation boundary ADR-055
+        # Amendment A names as "primary".
         run: |
-          docker run -d --name nats-test -p 4222:4222 nats:2.14.0 --jetstream
+          docker run -d --name nats-test -p 4222:4222 \
+            -v "$PWD/tests/fixtures/nats-multi-account.conf:/etc/nats.conf:ro" \
+            nats:2.14.0 -c /etc/nats.conf --jetstream
           for i in $(seq 1 20); do
             if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
               echo "NATS reachable on 4222"
@@ -118,9 +130,23 @@ jobs:
           exit 1
 
       - name: NATS sink tests
-        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests
+        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests --test nats_broker_acl_tests
         env:
           NATS_URL: nats://localhost:4222
+          # Test-only credentials matching tests/fixtures/nats-multi-account.conf
+          # (a public file in this repo — values are not real secrets).
+          # Sourced from env to keep the test file free of password
+          # literals (CodeQL hard-coded-credentials rule).
+          PEAT_NATS_ACME_TEST_PASSWORD: acme-secret
+          PEAT_NATS_BRAVO_TEST_PASSWORD: bravo-secret
+          # Fail fast (panic) instead of silent-skipping the broker-ACL
+          # suite if the fixture mount, credentials, or broker
+          # connectivity are missing. ADR-055 Amendment A names the
+          # broker-level ACLs as the **primary** tenant-isolation
+          # boundary, so a CI regression that drops any of those
+          # preconditions must surface as a hard test failure rather
+          # than a vacuous green. Per QA Review on PR #122.
+          PEAT_REQUIRE_NATS_ACL_FIXTURE: "1"
 
       - name: Stop NATS
         if: always()
