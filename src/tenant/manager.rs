@@ -770,10 +770,36 @@ fn validate_non_empty(value: &str, field: &str) -> Result<()> {
 fn validate_sink_type(sink_type: &CdcSinkType) -> Result<()> {
     match sink_type {
         CdcSinkType::Webhook { url } => validate_http_url(url, "webhook url")?,
-        CdcSinkType::Nats { subject_prefix } => {
-            validate_non_empty(subject_prefix, "subject_prefix")?
-        }
+        CdcSinkType::Nats { subject_prefix } => validate_nats_subject_prefix(subject_prefix)?,
         CdcSinkType::Kafka { topic } => validate_non_empty(topic, "topic")?,
+    }
+    Ok(())
+}
+
+/// Validate a NATS CDC sink's `subject_prefix`.
+///
+/// Restricts the prefix to `[A-Za-z0-9._-]+` so a tenant cannot embed NATS
+/// wildcard characters (`*`, `>`) or whitespace that would break subject-
+/// hierarchy semantics or expand the prefix's effective scope at the
+/// broker. Per QA review on peat-gateway#123 — the prior shape only
+/// required non-empty, which let pathological inputs through.
+///
+/// Note: the platform unconditionally prefixes the published subject with
+/// `{org_id}` (see `NatsSink::publish`), so cross-tenant subject overlap
+/// is ruled out structurally regardless of this character class. The
+/// validation here is defence-in-depth: it rejects shapes that would be
+/// surprising to operators (`a..b`, leading `.`) or actively hostile
+/// (`>` to claim a parent's subtree under the org's own namespace).
+fn validate_nats_subject_prefix(value: &str) -> Result<()> {
+    validate_non_empty(value, "subject_prefix")?;
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        bail!("subject_prefix must not have empty tokens (leading/trailing/double dot)");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        bail!("subject_prefix must contain only [A-Za-z0-9._-]");
     }
     Ok(())
 }
@@ -1812,6 +1838,36 @@ mod tests {
             )
             .await
             .is_err());
+
+        // Nats subject_prefix with NATS wildcard `*` rejected.
+        for bad in ["a*b", "a>b", "a b", "a..b", ".leading", "trailing.", "a/b"] {
+            assert!(
+                mgr.create_sink(
+                    "acme",
+                    CdcSinkType::Nats {
+                        subject_prefix: bad.into()
+                    }
+                )
+                .await
+                .is_err(),
+                "expected subject_prefix `{bad}` to be rejected"
+            );
+        }
+
+        // Well-formed prefixes still accepted (tokens of [A-Za-z0-9_-]).
+        for ok in ["cdc", "peat.cdc", "ns-1.tier_2"] {
+            assert!(
+                mgr.create_sink(
+                    "acme",
+                    CdcSinkType::Nats {
+                        subject_prefix: ok.into()
+                    }
+                )
+                .await
+                .is_ok(),
+                "expected subject_prefix `{ok}` to be accepted"
+            );
+        }
 
         // Kafka with empty topic
         assert!(mgr
