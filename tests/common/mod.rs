@@ -3,5 +3,7 @@
 // helpers. Allowing dead_code keeps that pattern clean.
 #![allow(dead_code)]
 
+pub mod gateway_config;
+
 #[cfg(feature = "nats")]
 pub mod nats;

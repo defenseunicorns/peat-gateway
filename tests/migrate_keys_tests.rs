@@ -3,29 +3,14 @@
 //! Verifies that plaintext genesis records are encrypted in-place and that
 //! already-encrypted records are left untouched.
 
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
+use peat_gateway::config::GatewayConfig;
 use peat_gateway::tenant::models::EnrollmentPolicy;
 use peat_gateway::tenant::TenantManager;
 
+mod common;
+
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    }
+    common::gateway_config::default_gateway_config(db_path)
 }
 
 #[tokio::test]
@@ -122,23 +107,9 @@ async fn migrate_skips_already_encrypted_records() {
     let kek_hex = "dd".repeat(32);
 
     // Create with encryption enabled
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
+    let config = peat_gateway::config::GatewayConfig {
         kek: Some(kek_hex.clone()),
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_gateway_config(&db_path)
     };
 
     {

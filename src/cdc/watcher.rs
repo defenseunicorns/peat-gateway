@@ -525,7 +525,7 @@ mod tests {
     mod lifecycle {
         use super::*;
         use crate::cdc::CdcEngine;
-        use crate::config::{CdcConfig, GatewayConfig, StorageConfig};
+        use crate::config::StorageConfig;
         use crate::tenant::TenantManager;
         use peat_mesh::sync::in_memory::InMemoryBackend;
         use peat_mesh::sync::traits::DataSyncBackend;
@@ -534,24 +534,9 @@ mod tests {
         async fn setup() -> (TenantManager, CdcEngine, tempfile::TempDir) {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("test.redb");
-            let config = GatewayConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                storage: StorageConfig::Redb {
-                    path: db_path.to_str().unwrap().into(),
-                },
-                cdc: CdcConfig {
-                    nats_url: None,
-                    kafka_brokers: None,
-                },
-                ui_dir: None,
-                admin_token: None,
-                kek: None,
-                kms_key_arn: None,
-                vault_addr: None,
-                vault_token: None,
-                vault_transit_key: None,
-                ingress: crate::config::IngressConfig::default(),
-            };
+            let config = crate::config::default_test_config(StorageConfig::Redb {
+                path: db_path.to_str().unwrap().into(),
+            });
             let tenant_mgr = TenantManager::new(&config).await.unwrap();
             let engine = CdcEngine::new(&config, tenant_mgr.clone()).await.unwrap();
             (tenant_mgr, engine, dir)

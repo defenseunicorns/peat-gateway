@@ -3,35 +3,19 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::tenant::models::{EnrollmentPolicy, MeshTier};
 use peat_gateway::tenant::TenantManager;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+mod common;
 
 // ── Helpers ────────────────────────────────────────────────────
 
 async fn setup() -> (TenantManager, axum::Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    };
+    let config = common::gateway_config::default_gateway_config(&db_path);
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
     (tenant_mgr, app, dir)
@@ -725,23 +709,9 @@ async fn enroll_certificate_has_correct_tier_and_permissions() {
 async fn setup_encrypted() -> (TenantManager, axum::Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
+    let config = peat_gateway::config::GatewayConfig {
         kek: Some("aa".repeat(32)),
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_gateway_config(&db_path)
     };
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = peat_gateway::api::app(tenant_mgr.clone());
@@ -791,23 +761,9 @@ async fn encrypted_genesis_issues_valid_certificate() {
 async fn encrypted_genesis_stored_bytes_are_not_plaintext() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
+    let config = peat_gateway::config::GatewayConfig {
         kek: Some("bb".repeat(32)),
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_gateway_config(&db_path)
     };
     // Create org + formation (encrypts genesis), then drop to release redb lock
     {

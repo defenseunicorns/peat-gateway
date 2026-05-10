@@ -11,11 +11,13 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::Result;
 use async_trait::async_trait;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
+use peat_gateway::config::GatewayConfig;
 use peat_gateway::crypto::{self, AwsKmsProvider, KeyProvider, LocalKeyProvider};
 use peat_gateway::tenant::models::EnrollmentPolicy;
 use peat_gateway::tenant::TenantManager;
 use rand_core::RngCore;
+
+mod common;
 
 // ── Mock KMS ───────────────────────────────────────────────────────────────
 
@@ -60,24 +62,7 @@ fn mock_kms_provider(key: [u8; 32]) -> AwsKmsProvider {
 }
 
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    }
+    common::gateway_config::default_gateway_config(db_path)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

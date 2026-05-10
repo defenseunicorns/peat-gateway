@@ -22,9 +22,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use peat_gateway::config::{
-    CdcConfig, GatewayConfig, IngressConfig, NatsIngressConfig, StorageConfig,
-};
+use peat_gateway::config::{GatewayConfig, IngressConfig, NatsIngressConfig};
 use peat_gateway::ingress::IngressEngine;
 use peat_gateway::tenant::TenantManager;
 
@@ -33,22 +31,8 @@ use common::nats::{delete_stream, jetstream, publish_ctl, try_client};
 
 fn base_config(db_path: &std::path::Path, ingress: IngressConfig) -> GatewayConfig {
     GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
         ingress,
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
+        ..common::gateway_config::default_gateway_config(db_path)
     }
 }
 

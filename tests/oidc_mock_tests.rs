@@ -14,13 +14,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::crypto;
 use peat_gateway::storage::{self, StorageBackend};
 use peat_gateway::tenant::models::{EnrollmentPolicy, IdpConfig, MeshTier};
 use peat_gateway::tenant::TenantManager;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+mod common;
 
 // ── Mock OIDC server ────────────────────────────────────────────
 
@@ -177,24 +178,7 @@ async fn setup_with_mock_idp(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    };
+    let config = common::gateway_config::default_gateway_config(&db_path);
 
     let store = storage::open(&config.storage).await.unwrap();
     let store: Arc<dyn StorageBackend> = Arc::from(store);
