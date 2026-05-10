@@ -200,15 +200,20 @@ nats consumer add peat-gw-dlq dlq-acme-inspect \
 nats consumer next peat-gw-dlq dlq-acme-inspect --count=5 --headers
 ```
 
+**Handler panic recovery** ([#118][gh-118], landed). Handler invocations
+are wrapped in `AssertUnwindSafe(...).catch_unwind()` so a panicking
+handler can't crash the per-org dispatch task and orphan its JetStream
+consumer. A caught panic surfaces as a handler `Err` and takes the same
+DLQ-on-final-attempt / nack-otherwise path as a returned error. The
+panic message rides as `Peat-Last-Error`, and a
+`peat_gw_ingress_handler_panics_total{org_id}` counter is incremented
+on every catch so persistent panics are observable.
+
 **Out of scope** (separate follow-ups):
 
-- **Handler panic recovery** — a panicking handler still crashes the
-  per-org dispatch task. The orphaned consumer remains; restart or
-  re-`ensure_org_subscription` recovers. Tracked as a follow-up to
-  [#108][gh-108].
-- **Admin API endpoint** for DLQ inspection / replay — operators use
-  the `nats` CLI today. A REST surface for this lives behind the same
-  IDAM federation work as [#99][gh-99].
+- **Admin API endpoint** for DLQ inspection / replay — [#119][gh-119].
+  Operators use the `nats` CLI today. A REST surface for this lives
+  behind the same IDAM federation work as [#99][gh-99].
 
 ## Open work
 
@@ -239,3 +244,5 @@ the dispatch loop.
 [gh-105]: https://github.com/defenseunicorns/peat-gateway/issues/105
 [gh-106]: https://github.com/defenseunicorns/peat-gateway/issues/106
 [gh-108]: https://github.com/defenseunicorns/peat-gateway/issues/108
+[gh-118]: https://github.com/defenseunicorns/peat-gateway/issues/118
+[gh-119]: https://github.com/defenseunicorns/peat-gateway/issues/119
