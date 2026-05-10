@@ -49,9 +49,15 @@ Why not exactly-once? Exactly-once requires transactional coordination between t
 
 ### NATS JetStream
 
-Subject hierarchy: `{org_id}.{app_id}.{document_id}`
+Subject hierarchy: `{subject_prefix}.{app_id}.{document_id}` (the per-tenant CDC sink config sets `subject_prefix`).
 
-Events are published as JetStream messages. The sink advances its cursor only after receiving a JetStream acknowledgment. NATS's built-in deduplication (via `Nats-Msg-Id` header set to the change hash) prevents duplicate delivery even if the gateway replays.
+Events are published via **JetStream** (peat-gateway#92's first slice; ADR-055 conformant). The sink:
+
+- Idempotently ensures a per-prefix stream named `peat-gw-cdc-{sanitized-prefix}` covering `{prefix}.>` on first publish to each prefix; subsequent publishes hit a local cache.
+- Awaits the broker's publish ack — `publish` returns `Ok` only after the stream has durably stored the event and returned a sequence number. **At-least-once delivery**, replacing the prior at-most-once core-publish path.
+- Sets the `Nats-Msg-Id` header to the change hash; JetStream's default 2-minute dedup window suppresses duplicates from gateway replays.
+
+JS publish remains wire-compatible with core NATS subscribers — the broker captures the message into the stream AND distributes to any matching SUBs, so consumers built on either core or JS continue to work.
 
 ### Kafka
 

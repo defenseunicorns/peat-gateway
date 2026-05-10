@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use peat_gateway::tenant::models::{CdcSinkType, EnrollmentPolicy};
 use serde_json::json;
 
@@ -311,4 +312,96 @@ async fn reconnect_after_broker_churn() {
         delivered,
         "post-churn event was not delivered within reconnect window"
     );
+}
+
+// ── JetStream migration (#92 first slice) ────────────────────────
+
+#[tokio::test]
+async fn cdc_publish_lands_in_jetstream_stream_and_is_replayable() {
+    // The JetStream migration (peat-gateway#92 first slice) flips the CDC
+    // sink from core publish (at-most-once, fire-and-forget) to JS publish
+    // with an awaited ack — at-least-once. This test asserts the JS
+    // contract:
+    //
+    //  1. The sink's auto-created stream `peat-gw-cdc-{prefix}` exists
+    //     and captures the published subject.
+    //  2. A pull consumer attached to that stream replays the message —
+    //     which proves the message is *durable*, not just delivered to
+    //     in-flight subscribers (the pre-#92 contract).
+    //
+    // Core subscriber tests (`publish_event_arrives_on_nats_subject` etc)
+    // cover the wire-compat side: JS publish still fans out to core SUBs.
+
+    let Some(client) = try_client().await else {
+        return;
+    };
+    let Some(h) = Harness::setup().await else {
+        return;
+    };
+    let js = common::nats::jetstream(&client);
+
+    let prefix = "jstest.acme";
+    h.tenants
+        .create_org("acme".into(), "Acme".into())
+        .await
+        .unwrap();
+    h.tenants
+        .create_formation("acme", "logistics".into(), EnrollmentPolicy::Open)
+        .await
+        .unwrap();
+    h.tenants
+        .create_sink(
+            "acme",
+            CdcSinkType::Nats {
+                subject_prefix: prefix.into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = make_event("acme", "logistics", "doc-js-1", "hash-js-1");
+    h.engine.publish(&event).await.unwrap();
+
+    let stream = js
+        .get_stream("peat-gw-cdc-jstest-acme")
+        .await
+        .expect("CDC stream should be auto-created on first publish");
+
+    // Pull consumer to deterministically read back what was published.
+    let consumer = stream
+        .get_or_create_consumer(
+            "jstest-replay",
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("jstest-replay".into()),
+                filter_subject: format!("{prefix}.logistics.doc-js-1"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut messages = consumer.messages().await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), messages.next())
+        .await
+        .expect("JS consumer should yield the replayed message")
+        .expect("messages stream closed")
+        .expect("message error");
+
+    let received: peat_gateway::tenant::models::CdcEvent =
+        serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(received.org_id, "acme");
+    assert_eq!(received.document_id, "doc-js-1");
+    assert_eq!(received.change_hash, "hash-js-1");
+
+    let info = msg.info().expect("JS message should carry info");
+    assert!(
+        info.stream_sequence >= 1,
+        "stream sequence should be at least 1; got {}",
+        info.stream_sequence
+    );
+    msg.ack().await.unwrap();
+
+    // Cleanup so other test runs don't accumulate this stream.
+    let _ = stream.delete_consumer("jstest-replay").await;
+    let _ = js.delete_stream("peat-gw-cdc-jstest-acme").await;
 }
