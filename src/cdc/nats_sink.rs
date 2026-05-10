@@ -191,14 +191,27 @@ mod inner {
     /// the same fragment. The stream-name format
     /// `peat-gw-cdc-{org}-{prefix}` is therefore not guaranteed unique on
     /// `(sanitized-org, sanitized-prefix)` alone if two tenants picked
-    /// strings that differ only in punctuation.  In practice the broker
-    /// guards against the second hazard: subjects are NOT sanitized (they
-    /// include the raw `org_id` as the leading token), so two distinct
-    /// tenants always live in disjoint subject spaces and their stream
-    /// configs cannot overlap. Stream-name collision after sanitization
-    /// would surface as a `get_or_create_stream` error at sink-init time
-    /// (subject mismatch on existing stream), not as silent cross-tenant
-    /// leakage.
+    /// strings that differ only in punctuation. Cross-tenant leakage is
+    /// still impossible — subjects are NOT sanitized (they include the
+    /// raw `org_id` as the leading token), so two distinct tenants always
+    /// live in disjoint subject spaces.
+    ///
+    /// The narrow residual case is one org configuring two
+    /// `subject_prefix` values that sanitize to the same fragment (e.g.
+    /// `a.b` and `a-b`). `org_id` is already restricted by
+    /// `validate_identifier` to `[A-Za-z0-9_-]+`, so org-side
+    /// sanitization is a no-op.
+    ///
+    /// `async-nats`' `Context::get_or_create_stream` does NOT reconcile
+    /// the supplied subjects/dedup/limits against the existing stream on
+    /// a name match — it returns the cached stream silently. So a
+    /// sanitization collision does NOT surface at sink-init: the second
+    /// `ensure_stream_for` call returns Ok pointing at the first
+    /// tenant's stream (whose subjects bind only the *first* prefix's
+    /// space). The collision surfaces at the next publish, when the
+    /// second prefix's subject doesn't match any stream and JetStream
+    /// returns a publish-time error ("no stream available"). Loud, not
+    /// silent — but the symptom location is publish, not init.
     fn sanitize_for_stream_name(s: &str) -> String {
         s.chars()
             .map(|c| {
