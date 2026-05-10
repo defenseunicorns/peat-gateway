@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine as _;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
+use peat_gateway::config::GatewayConfig;
 use peat_gateway::crypto::{self, KeyProvider, LocalKeyProvider, VaultTransitProvider};
 use peat_gateway::tenant::models::EnrollmentPolicy;
 use peat_gateway::tenant::TenantManager;
@@ -229,7 +229,7 @@ async fn start_mock_vault(state: VaultState) -> (String, VaultState) {
 }
 
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    common::gateway_config::default_gateway_config(&db_path)
+    common::gateway_config::default_gateway_config(db_path)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

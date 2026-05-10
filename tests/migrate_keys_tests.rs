@@ -10,7 +10,7 @@ use peat_gateway::tenant::TenantManager;
 mod common;
 
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    common::gateway_config::default_gateway_config(&db_path)
+    common::gateway_config::default_gateway_config(db_path)
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
+use peat_gateway::config::{GatewayConfig, StorageConfig};
 use peat_gateway::storage::{self, StorageBackend};
 use peat_gateway::tenant::models::*;
 use peat_gateway::tenant::TenantManager;

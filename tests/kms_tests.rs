@@ -11,7 +11,7 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::Result;
 use async_trait::async_trait;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
+use peat_gateway::config::GatewayConfig;
 use peat_gateway::crypto::{self, AwsKmsProvider, KeyProvider, LocalKeyProvider};
 use peat_gateway::tenant::models::EnrollmentPolicy;
 use peat_gateway::tenant::TenantManager;
@@ -62,7 +62,7 @@ fn mock_kms_provider(key: [u8; 32]) -> AwsKmsProvider {
 }
 
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    common::gateway_config::default_gateway_config(&db_path)
+    common::gateway_config::default_gateway_config(db_path)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
