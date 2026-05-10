@@ -98,8 +98,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
 
       - name: Start NATS with JetStream
+        # Pin to a specific nats-server version (peat-gateway#101) so a
+        # major release that changes default behaviour or strict-validation
+        # rules can't silently break this job — same exposure class as the
+        # pnpm 11 surprise that took out publish on 2026-05-08 (#96). Bumps
+        # are an explicit human-driven PR; the version here is updated
+        # together with any local-dev guidance in docs/cdc.md.
         run: |
-          docker run -d --name nats-test -p 4222:4222 nats:latest --jetstream
+          docker run -d --name nats-test -p 4222:4222 nats:2.14.0 --jetstream
           for i in $(seq 1 20); do
             if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
               echo "NATS reachable on 4222"
