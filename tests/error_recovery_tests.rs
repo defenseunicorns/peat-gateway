@@ -19,7 +19,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use peat_gateway::cdc::{CdcEngine, CdcWatcher};
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::crypto;
 use peat_gateway::storage::{self, StorageBackend};
 use peat_gateway::tenant::models::*;
@@ -29,6 +28,8 @@ use peat_mesh::sync::traits::{DataSyncBackend, DocumentStore};
 use peat_mesh::sync::types::{BackendConfig, Document, TransportConfig};
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+mod common;
 
 // ── FailingStorage wrapper ──────────────────────────────────────
 
@@ -239,24 +240,7 @@ async fn setup_failing() -> (
 ) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    };
+    let config = common::gateway_config::default_gateway_config(&db_path);
 
     let inner = storage::open(&config.storage).await.unwrap();
     let failing = Arc::new(FailingStorage::new(inner));

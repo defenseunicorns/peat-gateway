@@ -17,6 +17,8 @@ use peat_gateway::tenant::models::*;
 use peat_gateway::tenant::TenantManager;
 use sqlx::PgPool;
 
+mod common;
+
 fn admin_url() -> String {
     std::env::var("PEAT_TEST_POSTGRES_URL")
         .unwrap_or_else(|_| "postgres://peat:peat@localhost:5432/postgres".into())
@@ -80,21 +82,9 @@ async fn open_store(url: &str) -> Box<dyn StorageBackend> {
 }
 
 fn make_config(url: &str, kek: Option<&str>) -> GatewayConfig {
-    GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Postgres { url: url.into() },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
+    peat_gateway::config::GatewayConfig {
         kek: kek.map(String::from),
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_postgres_config(url)
     }
 }
 

@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 
 use peat_gateway::api;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::tenant::TenantManager;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
+
+mod common;
 
 const ADMIN_TOKEN: &str = "test-admin-secret-token";
 
@@ -13,23 +14,9 @@ async fn spawn_authenticated() -> (Client, String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
 
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
+    let config = peat_gateway::config::GatewayConfig {
         admin_token: Some(ADMIN_TOKEN.into()),
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_gateway_config(&db_path)
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
@@ -52,24 +39,7 @@ async fn spawn_unauthenticated() -> (Client, String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
 
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    };
+    let config = common::gateway_config::default_gateway_config(&db_path);
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let app = api::app(tenant_mgr);

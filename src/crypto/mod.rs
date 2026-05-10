@@ -288,24 +288,9 @@ mod tests {
     // ── build_key_provider tests ──────────────────────────────────────────
 
     fn test_config() -> GatewayConfig {
-        GatewayConfig {
-            bind_addr: "127.0.0.1:0".into(),
-            storage: crate::config::StorageConfig::Redb {
-                path: "/dev/null".into(),
-            },
-            cdc: crate::config::CdcConfig {
-                nats_url: None,
-                kafka_brokers: None,
-            },
-            ui_dir: None,
-            admin_token: None,
-            kek: None,
-            kms_key_arn: None,
-            vault_addr: None,
-            vault_token: None,
-            vault_transit_key: None,
-            ingress: crate::config::IngressConfig::default(),
-        }
+        crate::config::default_test_config(crate::config::StorageConfig::Redb {
+            path: "/dev/null".into(),
+        })
     }
 
     #[tokio::test]

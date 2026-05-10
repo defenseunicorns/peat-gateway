@@ -86,6 +86,26 @@ pnpm lint
 
 Integration tests live in the `tests/` directory and cover API behavior, CDC sinks, error recovery, identity federation, key management, storage isolation, and load scenarios.
 
+### Test fixtures: `GatewayConfig`
+
+Don't construct `GatewayConfig { ... }` literals in integration tests. Use the shared fixture in `tests/common/gateway_config.rs`:
+
+```rust
+mod common;
+
+let dir = tempfile::tempdir().unwrap();
+let config = common::gateway_config::default_gateway_config(&dir.path().join("test.redb"));
+
+// Override only what the test needs:
+let config = peat_gateway::config::GatewayConfig {
+    kek: Some(my_kek.into()),
+    admin_token: Some("admin-token".into()),
+    ..common::gateway_config::default_gateway_config(&db_path)
+};
+```
+
+Adding a new field to `GatewayConfig` updates 4 sites (the struct in `src/config.rs`, `from_env`, the `default_test_config` helper at the bottom of `src/config.rs` for crate-internal `#[cfg(test)]` modules, and `tests/common/gateway_config.rs` for integration tests). Direct literals in tests/* are a maintenance hazard — they're spread across feature-gated files (`postgres`, `aws-kms`, `vault`, `kafka`) that only compile under their respective feature flags, so a missed update goes red one CI matrix entry at a time post-push (peat-gateway#102 hit this exactly).
+
 ## Pre-Commit Checks
 
 Before submitting a PR, ensure all of the following pass locally:

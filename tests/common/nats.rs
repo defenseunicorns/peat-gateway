@@ -32,7 +32,6 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use peat_gateway::cdc::CdcEngine;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::tenant::models::CdcEvent;
 use peat_gateway::tenant::TenantManager;
 use serde_json::json;
@@ -83,23 +82,12 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.redb");
 
-        let config = GatewayConfig {
-            bind_addr: "127.0.0.1:0".into(),
-            storage: StorageConfig::Redb {
-                path: db_path.to_str().unwrap().into(),
-            },
-            cdc: CdcConfig {
+        let config = peat_gateway::config::GatewayConfig {
+            cdc: peat_gateway::config::CdcConfig {
                 nats_url: Some(url.into()),
-                kafka_brokers: None,
+                ..Default::default()
             },
-            ui_dir: None,
-            admin_token: None,
-            kek: None,
-            kms_key_arn: None,
-            vault_addr: None,
-            vault_token: None,
-            vault_transit_key: None,
-            ingress: peat_gateway::config::IngressConfig::default(),
+            ..super::gateway_config::default_gateway_config(&db_path)
         };
 
         let tenants = TenantManager::new(&config).await.unwrap();

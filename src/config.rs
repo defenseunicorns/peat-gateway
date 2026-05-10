@@ -38,7 +38,7 @@ pub enum StorageConfig {
     Postgres { url: String },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct CdcConfig {
     /// NATS server URL (if nats feature enabled)
     pub nats_url: Option<String>,
@@ -156,5 +156,30 @@ impl GatewayConfig {
             vault_token: env::var("PEAT_VAULT_TOKEN").ok(),
             vault_transit_key: env::var("PEAT_VAULT_TRANSIT_KEY").ok(),
         })
+    }
+}
+
+/// Default `GatewayConfig` for crate-internal `#[cfg(test)]` modules.
+/// Single source of truth for the test-fixture shape — adding a new
+/// `GatewayConfig` field updates this fn (one src/* site) plus
+/// `tests/common/gateway_config.rs` (one tests/* site). Per
+/// peat-gateway#103.
+#[cfg(test)]
+pub(crate) fn default_test_config(storage: StorageConfig) -> GatewayConfig {
+    GatewayConfig {
+        bind_addr: "127.0.0.1:0".into(),
+        storage,
+        cdc: CdcConfig {
+            nats_url: None,
+            kafka_brokers: None,
+        },
+        ingress: IngressConfig::default(),
+        ui_dir: None,
+        admin_token: None,
+        kek: None,
+        kms_key_arn: None,
+        vault_addr: None,
+        vault_token: None,
+        vault_transit_key: None,
     }
 }

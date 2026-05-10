@@ -16,12 +16,13 @@ use axum::routing::post;
 use axum::Router;
 use peat_gateway::api;
 use peat_gateway::cdc::CdcEngine;
-use peat_gateway::config::{CdcConfig, GatewayConfig, StorageConfig};
 use peat_gateway::tenant::models::CdcEvent;
 use peat_gateway::tenant::TenantManager;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+
+mod common;
 
 // ── Fixtures ─────────────────────────────────────────────────────
 
@@ -40,23 +41,9 @@ async fn spawn_two_orgs() -> (Client, String, OrgFixture, OrgFixture, tempfile::
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("isolation.redb");
 
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
+    let config = peat_gateway::config::GatewayConfig {
         kek: Some("aa".repeat(32)),
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
+        ..common::gateway_config::default_gateway_config(&db_path)
     };
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
@@ -560,24 +547,7 @@ async fn cdc_layer_cross_org_event_isolation() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("cdc-iso.redb");
 
-    let config = GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    };
+    let config = common::gateway_config::default_gateway_config(&db_path);
 
     let tenant_mgr = TenantManager::new(&config).await.unwrap();
     let cdc_engine = CdcEngine::new(&config, tenant_mgr.clone()).await.unwrap();

@@ -22,6 +22,8 @@ use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+mod common;
+
 // ── Mock Vault Transit Server ──────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -227,24 +229,7 @@ async fn start_mock_vault(state: VaultState) -> (String, VaultState) {
 }
 
 fn base_config(db_path: &std::path::Path) -> GatewayConfig {
-    GatewayConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        storage: StorageConfig::Redb {
-            path: db_path.to_str().unwrap().into(),
-        },
-        cdc: CdcConfig {
-            nats_url: None,
-            kafka_brokers: None,
-        },
-        ui_dir: None,
-        admin_token: None,
-        kek: None,
-        kms_key_arn: None,
-        vault_addr: None,
-        vault_token: None,
-        vault_transit_key: None,
-        ingress: peat_gateway::config::IngressConfig::default(),
-    }
+    common::gateway_config::default_gateway_config(&db_path)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
