@@ -97,15 +97,27 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev pkg-config libssl-dev
 
-      - name: Start NATS with JetStream
+      - name: Start NATS with JetStream + multi-account config
         # Pin to a specific nats-server version (peat-gateway#101) so a
         # major release that changes default behaviour or strict-validation
         # rules can't silently break this job — same exposure class as the
         # pnpm 11 surprise that took out publish on 2026-05-08 (#96). Bumps
         # are an explicit human-driven PR; the version here is updated
         # together with any local-dev guidance in docs/cdc.md.
+        #
+        # The broker is started with `tests/fixtures/nats-multi-account.conf`
+        # (peat-gateway#97), which defines per-org ACME / BRAVO accounts
+        # alongside the default $G account that anonymous connections fall
+        # into. Existing tests connect anonymously → $G with full
+        # permissions, behaviour unchanged. The new
+        # tests/nats_broker_acl_tests.rs connects as user=acme and asserts
+        # the broker rejects publishes outside acme's permitted subject
+        # space — the broker-level tenant-isolation boundary ADR-055
+        # Amendment A names as "primary".
         run: |
-          docker run -d --name nats-test -p 4222:4222 nats:2.14.0 --jetstream
+          docker run -d --name nats-test -p 4222:4222 \
+            -v "$PWD/tests/fixtures/nats-multi-account.conf:/etc/nats.conf:ro" \
+            nats:2.14.0 -c /etc/nats.conf --jetstream
           for i in $(seq 1 20); do
             if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
               echo "NATS reachable on 4222"
@@ -118,7 +130,7 @@ jobs:
           exit 1
 
       - name: NATS sink tests
-        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests
+        run: cargo test --features nats --test nats_sink_tests --test nats_jetstream_tests --test nats_ingress_tests --test nats_broker_acl_tests
         env:
           NATS_URL: nats://localhost:4222
 

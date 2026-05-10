@@ -62,8 +62,16 @@ Three layers, ordered from primary to defence-in-depth:
 
 1. **Broker-level account ACLs** ([peat-gateway#97][gh-97]) — per-org NATS
    accounts with publish permission scoped to the org's own
-   `{org}.*.ctl.>` subject space. Cross-org publish is rejected by the
-   broker. *Not yet shipped — primary boundary is missing today.*
+   `{org}.>` subject space. Cross-org publish is rejected by the
+   broker before reaching the gateway. The reference test config in
+   `tests/fixtures/nats-multi-account.conf` shows the canonical layout
+   (per-org account with `publish.allow: ["{org}.>"]`); production
+   deployments mirror this structure with one NATS account per
+   gateway-managed org. CI runs the test broker with this config so
+   the new `tests/nats_broker_acl_tests.rs` exercises actual broker
+   rejection — `acme→bravo.>` publish surfaces as
+   `Event::ServerError(ServerError::Other("Permissions Violation..."))`
+   on the publishing connection's events stream.
 2. **Per-org JetStream consumer `filter_subjects`** — each org's durable
    consumer accepts only `{org}.*.ctl.>`. This is enforced by the broker
    even with no account-level ACLs and is verified in
