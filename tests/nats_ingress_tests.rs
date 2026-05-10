@@ -921,8 +921,12 @@ async fn poison_pill_payload_routes_to_dlq_on_max_deliver() {
 
     dlq_msg.ack().await.unwrap();
 
+    // Clean up the per-test pull consumer on the shared peat-gw-dlq
+    // stream. Without this each CI run leaves an abandoned dlq-test-{org}
+    // consumer behind. Intentionally NOT deleting peat-gw-dlq itself
+    // — it's shared across all test engines (each engine.new()
+    // idempotently re-creates it) and a delete here would race other
+    // tests holding DLQ consumers.
+    let _ = dlq_stream.delete_consumer(&format!("dlq-test-{org}")).await;
     delete_stream(&js, &stream_name).await;
-    // Intentionally NOT deleting peat-gw-dlq — it's shared across all
-    // test engines (each engine.new() idempotently re-creates it). A
-    // delete here would race other tests holding DLQ consumers.
 }

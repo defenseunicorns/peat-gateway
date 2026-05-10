@@ -67,6 +67,13 @@ ingress:
     # `{consumerPrefix}-{org_id}`, stable across restarts so the cursor
     # replays cleanly.
     consumerPrefix: peat-gw
+    # Maximum delivery attempts per message before routing to the DLQ
+    # stream `peat-gw-dlq` (peat-gateway#108). Default 5.
+    maxDeliver: 5
+    # Per-message ack timeout in seconds — the broker considers a
+    # delivery failed and may redeliver (subject to maxDeliver) if the
+    # consumer hasn't acked within this. Default 30s.
+    ackWaitSecs: 30
 
 # -- Prometheus metrics
 metrics:

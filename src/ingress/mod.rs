@@ -126,10 +126,20 @@ const CONSUMER_MAX_ACK_PENDING: i64 = 1024;
 // Metadata travels in headers so operators can route / replay without
 // re-parsing the payload:
 //
-//   Peat-Org-Id          — the org_id parsed from the original subject
+//   Peat-Org-Id          — the org_id from the consumer (validated upstream)
 //   Peat-Original-Subject — the failing subject
 //   Peat-Delivery-Count  — how many times the broker tried before DLQ
-//   Peat-Last-Error      — error string from the last handler attempt
+//   Peat-Last-Error      — error string from the last handler attempt,
+//                          truncated to DLQ_LAST_ERROR_MAX_BYTES.
+//
+// **Note for handler authors.** The `Peat-Last-Error` header carries
+// the handler's error chain via `Display`. JetStream persists DLQ
+// entries durably and operators may replay or scrape them; tracing
+// also logs the same string. **Do not include payload fragments,
+// tokens, key fingerprints, or other tenant-sensitive material in
+// handler error chains.** A 1 KiB truncation is enforced at the
+// publish site as defence-in-depth, but it doesn't make leaked
+// secrets safe — only short. Keep error context generic.
 //
 // Out of scope here, tracked separately:
 //  - Handler panic recovery (panics still crash the dispatch task) —
@@ -141,6 +151,11 @@ const DLQ_HEADER_ORG_ID: &str = "Peat-Org-Id";
 const DLQ_HEADER_ORIGINAL_SUBJECT: &str = "Peat-Original-Subject";
 const DLQ_HEADER_DELIVERY_COUNT: &str = "Peat-Delivery-Count";
 const DLQ_HEADER_LAST_ERROR: &str = "Peat-Last-Error";
+/// NATS headers have a default ~16 KiB cap; verbose handler errors can
+/// blow that and make the DLQ publish itself fail (the fallback is just
+/// nack, which equals the pre-DLQ silent-drop behaviour). Truncate
+/// proactively so a chatty `with_context` chain never breaks DLQ.
+const DLQ_LAST_ERROR_MAX_BYTES: usize = 1024;
 
 // ── Stream-config TOCTOU mitigation ────────────────────────────
 //
@@ -242,13 +257,17 @@ impl IngressEngine {
         // publish to it later without doing JS-API calls in the hot path.
         // Stream subjects use a literal `peat.gw.dlq.>` prefix that does
         // not overlap with any per-org control-plane subject pattern.
-        js.get_or_create_stream(jetstream::stream::Config {
-            name: DLQ_STREAM_NAME.into(),
-            subjects: vec![format!("{DLQ_SUBJECT_ROOT}.>")],
-            ..Default::default()
-        })
-        .await
-        .with_context(|| format!("ingress engine failed to ensure DLQ stream {DLQ_STREAM_NAME}"))?;
+        // Uses the same drift-resistant ensure-stream-includes helper as
+        // the control-plane stream so a pre-existing peat-gw-dlq stream
+        // with a different subject list (e.g. left over from a prior
+        // version) gets updated to include our subject rather than
+        // silently mismatching.
+        let dlq_subjects = vec![format!("{DLQ_SUBJECT_ROOT}.>")];
+        ensure_stream_includes(&js, DLQ_STREAM_NAME, &dlq_subjects)
+            .await
+            .with_context(|| {
+                format!("ingress engine failed to ensure DLQ stream {DLQ_STREAM_NAME}")
+            })?;
 
         info!(
             url = %nats_cfg.url,
@@ -723,7 +742,24 @@ fn spawn_dispatch_loop(
                     }
                 }
                 Err(handler_err) => {
-                    let delivered = msg.info().map(|i| i.delivered).unwrap_or(0);
+                    // `msg.info()` parses the JS reply subject. Failure
+                    // here forces `delivered = 0`, which would silently
+                    // disable DLQ routing for this delivery — surface
+                    // it loudly so operators can detect malformed
+                    // delivery metadata.
+                    let delivered = match msg.info() {
+                        Ok(info) => info.delivered,
+                        Err(e) => {
+                            warn!(
+                                org_id = %org_id,
+                                subject = %subject,
+                                error = %e,
+                                "ingress dispatch: msg.info() unavailable; \
+                                 DLQ routing disabled for this delivery (delivered defaulted to 0)"
+                            );
+                            0
+                        }
+                    };
                     if delivered >= max_deliver {
                         warn!(
                             org_id = %org_id,
@@ -742,18 +778,32 @@ fn spawn_dispatch_loop(
                         )
                         .await
                         {
-                            // DLQ publish failed. Surface and fall through
-                            // to nack so the broker keeps the message
-                            // around (it'll exceed max_deliver anyway and
-                            // be dropped, but at least we don't lose it
-                            // silently if the DLQ stream is broken).
-                            warn!(
+                            // DLQ publish failed. This is the same
+                            // silent-loss class the DLQ exists to fix —
+                            // emit at error! and increment a counter so
+                            // operators can detect persistent breakage
+                            // before discovering it via missing replays.
+                            metrics::counter!(
+                                "peat_gw_ingress_dlq_publish_failures_total",
+                                "org_id" => org_id.clone()
+                            )
+                            .increment(1);
+                            tracing::error!(
                                 org_id = %org_id,
                                 subject = %subject,
                                 error = %dlq_err,
-                                "ingress dispatch: DLQ publish failed; falling back to nack"
+                                "ingress dispatch: DLQ publish FAILED on max-deliver \
+                                 attempt — payload at risk of silent loss; falling back \
+                                 to nack so the broker eventually drops it"
                             );
-                            let _ = msg.ack_with(AckKind::Nak(None)).await;
+                            if let Err(ack_err) = msg.ack_with(AckKind::Nak(None)).await {
+                                warn!(
+                                    org_id = %org_id,
+                                    subject = %subject,
+                                    error = %ack_err,
+                                    "ingress dispatch: fallback nack after DLQ failure also failed"
+                                );
+                            }
                         } else if let Err(ack_err) = msg.ack_with(AckKind::Term).await {
                             warn!(org_id = %org_id, subject = %subject, error = %ack_err, "ingress dispatch: term after DLQ failed");
                         }
@@ -786,6 +836,11 @@ async fn publish_dlq_entry(
     last_error: &str,
     payload: &[u8],
 ) -> Result<()> {
+    // Truncate at a UTF-8 char boundary to bound header size and protect
+    // against accidental sensitive-payload leakage from chatty handler
+    // error chains (see DLQ comment block).
+    let truncated_error = truncate_chars(last_error, DLQ_LAST_ERROR_MAX_BYTES);
+
     let mut headers = async_nats::HeaderMap::new();
     headers.insert(DLQ_HEADER_ORG_ID, org_id);
     headers.insert(DLQ_HEADER_ORIGINAL_SUBJECT, original_subject);
@@ -793,7 +848,7 @@ async fn publish_dlq_entry(
         DLQ_HEADER_DELIVERY_COUNT,
         delivery_count.to_string().as_str(),
     );
-    headers.insert(DLQ_HEADER_LAST_ERROR, last_error);
+    headers.insert(DLQ_HEADER_LAST_ERROR, truncated_error.as_ref());
 
     let dlq_subject = format!("{DLQ_SUBJECT_ROOT}.{org_id}");
     js.publish_with_headers(dlq_subject.clone(), headers, payload.to_vec().into())
@@ -808,6 +863,20 @@ async fn publish_dlq_entry(
         "ingress DLQ entry published"
     );
     Ok(())
+}
+
+/// Truncate at a UTF-8 char boundary so the result is always valid for
+/// a NATS header value (must be valid UTF-8). Returns the input
+/// unchanged when it already fits.
+fn truncate_chars(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if s.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}…[truncated]", &s[..end]))
 }
 
 /// Process one message end-to-end: parse subject, revalidate org_id, route
