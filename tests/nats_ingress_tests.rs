@@ -291,8 +291,19 @@ async fn remove_org_subscription_drains_to_empty_deletes_stream() {
 #[tokio::test]
 async fn per_org_consumer_only_receives_its_own_subjects() {
     // In-process tenant isolation layer. Even though the shared stream
-    // captures both orgs' messages, each org's consumer's filter_subjects
-    // confines delivery to its own namespace.
+    // captures both orgs' messages, each org's consumer's `filter_subjects`
+    // and per-org `deliver_subject` confine delivery to that org's
+    // namespace.
+    //
+    // We assert on the consumer's broker-side config — same pattern as
+    // `poison_pill_redelivers_at_most_max_deliver_times` — rather than
+    // racing the engine's auto-spawned dispatch loop for live messages
+    // off the same `deliver_group`. JetStream's honoring of
+    // `filter_subjects` is the broker's own invariant; what *we* are
+    // responsible for is configuring the consumer correctly per org.
+    // (Prior shape's flake: in CI, the dispatch loop's
+    // `consumer.messages().await` would win the race on slow runners
+    // and the test's parallel poll would time out at 5s.)
     let stream_name = unique_stream("isolation");
     let Some((engine, _dir)) = build_engine(&stream_name).await else {
         return;
@@ -306,11 +317,39 @@ async fn per_org_consumer_only_receives_its_own_subjects() {
     engine.ensure_org_subscription(&acme).await.unwrap();
     engine.ensure_org_subscription(&bravo).await.unwrap();
 
-    let acme_consumer = engine.consumer_for_org(&acme).await.unwrap();
-    let mut acme_messages = acme_consumer.messages().await.unwrap();
+    let stream = js.get_stream(&stream_name).await.unwrap();
 
-    // Publish a bravo org-level event using the `_org` sentinel app_id.
-    // The shared stream captures it, but acme's consumer must NOT see it.
+    for org in [&acme, &bravo] {
+        let consumer = stream
+            .get_consumer::<async_nats::jetstream::consumer::push::Config>(&format!(
+                "peat-gw-test-{org}"
+            ))
+            .await
+            .expect("per-org durable consumer should exist after ensure_org_subscription");
+        let info = consumer.cached_info();
+
+        let expected_filter = format!("{org}.*.ctl.>");
+        assert_eq!(
+            info.config.filter_subjects,
+            vec![expected_filter.clone()],
+            "{org}'s consumer must filter only its own org subtree"
+        );
+        // Per-org deliver_subject so two orgs never share a delivery
+        // channel (otherwise `deliver_group`-based fan-out would cross
+        // org boundaries on the wire even before filter_subjects kicks
+        // in).
+        assert_eq!(
+            info.config.deliver_subject.as_deref(),
+            Some(format!("_DELIVER.peat-gw-test.{org}").as_str()),
+            "{org}'s consumer must have its own deliver_subject"
+        );
+    }
+
+    // Sanity check: a published bravo subject is captured by the shared
+    // stream (so the isolation we assert above is non-trivial — bravo's
+    // event IS in the stream, the filter is what excludes it from acme's
+    // delivery). We poll the stream's last_sequence rather than racing
+    // the engine's dispatch loop to read the message.
     let bravo_subject = format!("{bravo}._org.ctl.formations.create");
     publish_ctl(
         &js,
@@ -322,35 +361,18 @@ async fn per_org_consumer_only_receives_its_own_subjects() {
         },
     )
     .await;
-
-    let nothing = tokio::time::timeout(Duration::from_millis(750), acme_messages.next()).await;
-    assert!(
-        nothing.is_err(),
-        "acme consumer must not receive bravo's event"
-    );
-
-    // Now publish for acme — it should arrive.
-    let acme_subject = format!("{acme}._org.ctl.formations.create");
-    publish_ctl(
-        &js,
-        &acme_subject,
-        &StubCtlEvent {
-            org_id: acme.clone(),
-            kind: "formations.create".into(),
-            nonce: 2,
-        },
-    )
-    .await;
-    let msg = tokio::time::timeout(Duration::from_secs(5), acme_messages.next())
+    // After the publish-with-ack returns, the broker has durably stored
+    // the message; a re-fetched stream-info confirms `last_sequence >= 1`.
+    let mut stream = stream;
+    let info = stream
+        .info()
         .await
-        .expect("timed out waiting for acme event")
-        .expect("consumer stream closed")
-        .expect("message error");
-    assert_eq!(msg.subject.as_str(), acme_subject);
-    let received: StubCtlEvent = serde_json::from_slice(&msg.payload).unwrap();
-    assert_eq!(received.org_id, acme);
-    assert_eq!(received.nonce, 2);
-    msg.ack().await.unwrap();
+        .expect("re-fetch stream info post-publish");
+    assert!(
+        info.state.last_sequence >= 1,
+        "shared stream should have captured bravo's publish (got last_sequence={})",
+        info.state.last_sequence
+    );
 
     delete_stream(&js, &stream_name).await;
 }
