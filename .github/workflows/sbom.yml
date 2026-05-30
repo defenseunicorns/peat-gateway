@@ -20,8 +20,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --quiet
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
 
       - name: Generate SBOM
         run: cargo cyclonedx --format json
