@@ -131,8 +131,8 @@ jobs:
                  Every finding must carry a tag with a defined action. Do NOT post optional/nice-to-have observations — if a finding has no clear action, omit it.
                  If there are no findings under any tag, write a single line: "No findings."
              (b) Use the Write tool to write the verdict to $RUNNER_TEMP/peat-qa-verdict:
-                 Write exactly `changes-requested` if any [BLOCKER], [WARNING], or [ARCH] finding is present.
-                 Write exactly `approve` if the review is clean or has only [IDIOM] findings.
+                 Write exactly: changes-requested if any [BLOCKER], [WARNING], or [ARCH] finding is present.
+                 Write exactly: approve if the review is clean or has only [IDIOM] findings.
                  No other content in that file.
              (c) Do NOT call gh pr review — the workflow posts the official review after you finish.
           PROMPT
@@ -176,8 +176,8 @@ jobs:
                  Every finding must carry a tag with a defined action. Do NOT post optional/nice-to-have observations — if a finding has no clear action, omit it.
                  If there are no findings under any tag, write a single line: "No findings."
              (b) Use the Write tool to write the verdict to $RUNNER_TEMP/peat-qa-verdict:
-                 Write exactly `changes-requested` if any [BLOCKER], [WARNING], or [ARCH] finding is present.
-                 Write exactly `approve` if the review is clean or has only [IDIOM] findings.
+                 Write exactly: changes-requested if any [BLOCKER], [WARNING], or [ARCH] finding is present.
+                 Write exactly: approve if the review is clean or has only [IDIOM] findings.
                  No other content in that file.
              (c) Do NOT call gh pr review — the workflow posts the official review after you finish.
           PROMPT
