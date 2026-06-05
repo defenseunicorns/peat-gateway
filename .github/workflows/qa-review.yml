@@ -65,6 +65,24 @@ jobs:
         run: |
           set -uo pipefail
           set +e
+
+          submit_review() {
+            local verdict verb
+            verdict=$(tr -d '[:space:]' < "$RUNNER_TEMP/peat-qa-verdict" 2>/dev/null || true)
+            case "$verdict" in
+              changes-requested) verb="--request-changes" ;;
+              approve)           verb="--approve" ;;
+              *)
+                echo "::warning::peat-qa-verdict missing or unrecognized ('${verdict}') — defaulting to --request-changes"
+                verb="--request-changes"
+                ;;
+            esac
+            if ! gh pr review "$PR_NUMBER" $verb --body-file "$RUNNER_TEMP/peat-qa-review.md"; then
+              echo "::error::gh pr review ${verb} failed — verdict not posted"
+              exit 1
+            fi
+          }
+
           if [ "$HAS_PRIOR" = "true" ]; then
             # unquoted heredoc: shell expands $PR_NUMBER, $SHORT_SHA, $PREV_SHA, $REPO, $RUNNER_TEMP — all from controlled outputs
             cat <<PROMPT | claude -p --model claude-opus-4-7 --allowedTools "Bash(gh pr view *),Bash(git diff *),Bash(git log *),Bash(cat $RUNNER_TEMP/peat-qa-prior.md),Write"
@@ -112,7 +130,11 @@ jobs:
                    [ARCH]     — architectural concern requiring human design review; do NOT propose a fix, escalate
                  Every finding must carry a tag with a defined action. Do NOT post optional/nice-to-have observations — if a finding has no clear action, omit it.
                  If there are no findings under any tag, write a single line: "No findings."
-             (b) Do NOT call gh pr review — the workflow posts the official review after you finish.
+             (b) Use the Write tool to write the verdict to $RUNNER_TEMP/peat-qa-verdict:
+                 Write exactly `changes-requested` if any [BLOCKER], [WARNING], or [ARCH] finding is present.
+                 Write exactly `approve` if the review is clean or has only [IDIOM] findings.
+                 No other content in that file.
+             (c) Do NOT call gh pr review — the workflow posts the official review after you finish.
           PROMPT
           else
             # unquoted heredoc: shell expands $PR_NUMBER, $SHORT_SHA, $REPO — all from controlled outputs
@@ -153,7 +175,11 @@ jobs:
                    [ARCH]     — architectural concern requiring human design review; do NOT propose a fix, escalate
                  Every finding must carry a tag with a defined action. Do NOT post optional/nice-to-have observations — if a finding has no clear action, omit it.
                  If there are no findings under any tag, write a single line: "No findings."
-             (b) Do NOT call gh pr review — the workflow posts the official review after you finish.
+             (b) Use the Write tool to write the verdict to $RUNNER_TEMP/peat-qa-verdict:
+                 Write exactly `changes-requested` if any [BLOCKER], [WARNING], or [ARCH] finding is present.
+                 Write exactly `approve` if the review is clean or has only [IDIOM] findings.
+                 No other content in that file.
+             (c) Do NOT call gh pr review — the workflow posts the official review after you finish.
           PROMPT
           fi
           rc=$?
@@ -163,8 +189,4 @@ jobs:
             exit 1
           fi
 
-          if grep -qE '\[BLOCKER\]|\[WARNING\]|\[ARCH\]' "$RUNNER_TEMP/peat-qa-review.md" 2>/dev/null; then
-            gh pr review "$PR_NUMBER" --request-changes --body-file "$RUNNER_TEMP/peat-qa-review.md"
-          else
-            gh pr review "$PR_NUMBER" --approve --body-file "$RUNNER_TEMP/peat-qa-review.md"
-          fi
+          submit_review
