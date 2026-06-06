@@ -58,7 +58,7 @@ async-nats = { version = "0.38", optional = true }
 # Stream traits for the JetStream consumer dispatch loop. Optional so the
 # dep is only pulled when the `nats` feature is on.
 futures-util = { version = "0.3", optional = true }
-rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }
+rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 tempfile = { version = "3", optional = true }
 
