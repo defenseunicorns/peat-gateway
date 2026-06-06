@@ -2945,7 +2945,7 @@ dependencies = [
  "postcard",
  "rand 0.9.4",
  "range-collections",
- "redb",
+ "redb 2.6.3",
  "ref-cast",
  "reflink-copy",
  "self_cell",
@@ -4186,7 +4186,7 @@ dependencies = [
  "peat-mesh",
  "rand_core 0.6.4",
  "rdkafka",
- "redb",
+ "redb 4.1.0",
  "reqwest",
  "serde",
  "serde_json",
@@ -4227,7 +4227,7 @@ dependencies = [
  "negentropy",
  "rand 0.9.4",
  "rand_core 0.6.4",
- "redb",
+ "redb 2.6.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4850,6 +4850,15 @@ name = "redb"
 version = "2.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "redb"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
 dependencies = [
  "libc",
 ]
