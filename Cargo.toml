@@ -59,7 +59,7 @@ async-nats = { version = "0.38", optional = true }
 # dep is only pulled when the `nats` feature is on.
 futures-util = { version = "0.3", optional = true }
 rdkafka = { version = "0.37", features = ["cmake-build"], optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.13", features = ["json"], optional = true }
 tempfile = { version = "3", optional = true }
 
 # KMS (optional)
@@ -92,7 +92,7 @@ loadtest = ["dep:reqwest", "dep:tempfile"]
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
 tempfile = "3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 async-nats = "0.38"
 futures = "0.3"
 peat-mesh = { version = "=0.9.0-rc.1", features = ["automerge-backend"] }
