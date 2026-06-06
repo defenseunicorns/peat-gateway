@@ -1,0 +1,37 @@
+# Dependabot config (peat-gateway).
+#
+# /ui is a SvelteKit app managed with pnpm (pnpm-lock.yaml lockfileVersion 9).
+# Dependabot cannot parse that lockfile to *rebase* an open PR, so when it
+# opened separate PRs per dependency they stacked and conflicted on the lock,
+# and `@dependabot rebase` no-op'd ("can't parse your pnpm-lock.yaml"). Grouping
+# all /ui updates into a single PR removes the inter-PR lock conflicts entirely
+# (one PR, one lock update, nothing to rebase), which is the recurring failure
+# mode this config fixes.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+    groups:
+      ui:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
