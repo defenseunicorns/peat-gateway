@@ -78,6 +78,7 @@ impl CdcWatcher {
                     ChangeEvent::Updated {
                         collection: _,
                         document,
+                        origin: _,
                     } => {
                         let doc_id = document.id.clone().unwrap_or_else(|| "unknown".to_string());
 
@@ -150,6 +151,7 @@ impl CdcWatcher {
                     ChangeEvent::Removed {
                         collection: _,
                         doc_id,
+                        origin: _,
                     } => {
                         let timestamp_ms = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
@@ -195,7 +197,7 @@ impl CdcWatcher {
                             );
                         }
                     }
-                    ChangeEvent::Initial { documents } => {
+                    ChangeEvent::Initial { documents, collection: _ } => {
                         debug!(
                             org_id = %task_org,
                             app_id = %task_app,
@@ -203,6 +205,7 @@ impl CdcWatcher {
                             "Received initial document snapshot (not emitting CDC events)"
                         );
                     }
+                    _ => {}
                 }
             }
 
