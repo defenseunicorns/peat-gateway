@@ -197,7 +197,10 @@ impl CdcWatcher {
                             );
                         }
                     }
-                    ChangeEvent::Initial { documents, collection: _ } => {
+                    ChangeEvent::Initial {
+                        documents,
+                        collection: _,
+                    } => {
                         debug!(
                             org_id = %task_org,
                             app_id = %task_app,
