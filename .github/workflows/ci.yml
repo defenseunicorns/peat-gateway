@@ -214,12 +214,26 @@ jobs:
         # RUSTSEC-2026-0119 — hickory-proto O(n²) name-compression DoS. Fixed
         # in hickory-proto 0.26.1. Pulled transitively via iroh (through
         # peat-mesh). Drop when iroh updates to hickory-proto >=0.26.1.
+        #
+        # RUSTSEC-2026-0194 / -0195 — quick-xml quadratic-runtime and
+        # unbounded namespace-allocation DoS (both fixed in quick-xml 0.41.0).
+        # Pulled transitively via netdev -> plist, a path compiled only on
+        # Apple targets (cfg(target_os = macos/ios)) for interface enumeration
+        # — NOT built into the Linux gateway artifact. No published plist
+        # release accepts quick-xml >=0.40 (newest, plist 1.9.0, pins
+        # `quick-xml ^0.39.2`), so the patched 0.41 is unreachable until plist
+        # ships a compatible release. Drop both when plist depends on
+        # quick-xml >=0.41 (re-check: `cargo tree -i quick-xml` + plist changelog).
         run: |
           cargo audit \
             --ignore RUSTSEC-2026-0118 \
             --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195 \
             2>&1 || true
           cargo audit \
             --ignore RUSTSEC-2026-0118 \
             --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195 \
             --json 2>/dev/null | jq -e '.vulnerabilities.count == 0'
