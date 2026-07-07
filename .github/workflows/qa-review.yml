@@ -20,7 +20,7 @@ jobs:
     runs-on: peat-arm64-linux-gb10-gateway
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
