@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Mesh networking
-peat-mesh = { version = "=0.9.0-rc.40", features = ["automerge-backend", "broker"] }
+peat-mesh = { version = "=0.9.0-rc.45", features = ["automerge-backend", "broker"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -95,7 +95,7 @@ tempfile = "3"
 reqwest = { version = "0.13", features = ["json", "form"] }
 async-nats = "0.49"
 futures = "0.3"
-peat-mesh = { version = "=0.9.0-rc.40", features = ["automerge-backend"] }
+peat-mesh = { version = "=0.9.0-rc.45", features = ["automerge-backend"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 base64 = "0.22"
 hex = "0.4"
